@@ -96,51 +96,35 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                     remaining_instr += this_active_task_info.remaining_instructions;
                 }
                 double mips_rating = this_machine_info.performance[this_machine_info.s_state] * 1000000;
-                double value = 1e-6;
-                double instr_possible_in_req_time = mips_rating * ((this_task_info.arrival - this_task_info.completion) / value);
-                double total_resources = instr_possible_in_req_time; // (this_machine_info.memory_size + instr_possible_in_req_time);
+                double time_remaining = (this_task_info.target_completion - this_task_info.arrival) / 1000000;
+                double instr_possible_in_req_time = mips_rating * time_remaining;
+                double total_resources = (this_machine_info.memory_size + instr_possible_in_req_time); // instr_possible_in_req_time;
 
-                double machine_util = remaining_instr / total_resources; // (this_machine_info.memory_used + remaining_instr) / total_resources;
-                double task_load_factor = this_task_info.total_instructions / total_resources; // (req_mem + this_task_info.total_instructions) / total_resources;
-                cout << "remaining instr on machine: " << remaining_instr << endl;
-                cout << "this tasks's total instr: " << this_task_info.total_instructions << endl;
-                cout << "total isntr possible in requested time: " << instr_possible_in_req_time << endl;
-                cout << "current machine util: " << machine_util << endl;
-                cout << "current task load factor: " << task_load_factor << endl;
+                double machine_util = (this_machine_info.memory_used + remaining_instr) / total_resources; // remaining_instr / total_resources;
+                double task_load_factor = (req_mem + this_task_info.total_instructions) / total_resources; // this_task_info.total_instructions / total_resources;
+
+                /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Debugging comments~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+                // cout << "completion time of task : " << this_task_info.target_completion << endl;
+                // cout << "arrival time of task : " << this_task_info.arrival << endl;
+                // cout << "time remaining of this task in seconds: " << time_remaining << endl;
+                // cout << "remaining instr on machine: " << remaining_instr << endl;
+                // cout << "this tasks's total instr: " << this_task_info.total_instructions << endl;
+                // cout << "total isntr possible in requested time: " << instr_possible_in_req_time << endl;
+                // cout << "current machine util: " << machine_util << endl;
+                // cout << "current task load factor: " << task_load_factor << endl;
+                /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
+
                 if (machine_util + task_load_factor < 1) {
                     // place workload on this VM
                     // giving every task a high priority for this one because greedy doesn't really
                     // specify a priority type? Maybe we can change later to prioritize shortest jobs first?
                     cout << "Attaching task " << task_id << " to VM " << this_VM_id << endl;
-                    // cout << "VM" << endl;
                     VM_AddTask(this_VM_id, task_id, HIGH_PRIORITY);
                     return;
                 }
             }
         }
     }
-
-    // Decide to attach the task to an existing VM, 
-    //      vm.AddTask(taskid, Priority_T priority); or
-    // Create a new VM, attach the VM to a machine
-    //      VM vm(type of the VM)
-    //      vm.Attach(machine_id);
-    //      vm.AddTask(taskid, Priority_t priority) or
-    // Turn on a machine, create a new VM, attach it to the VM, then add the task
-    //
-    // Turn on a machine, migrate an existing VM from a loaded machine....
-    //
-    // Other possibilities as desired
-
-    /*~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    Priority_t priority = (task_id == 0 || task_id == 64)? HIGH_PRIORITY : MID_PRIORITY;
-    if(migrating) {
-        VM_AddTask(vms[0], task_id, priority);
-    }
-    else {
-        VM_AddTask(vms[task_id % active_machines], task_id, priority);
-    }// Skeleton code, you need to change it according to your algorithm 
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~*/
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
@@ -167,6 +151,12 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
+
+    // sort all machines in a set of ascending order of their utilization
+
+    // for all machines in the set where the utilization is > 0
+        // for each workload in the given machine
+            // for all other machines 
 }
 
 // Public interface below
@@ -226,7 +216,10 @@ void SimulationComplete(Time_t time) {
 }
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
-    
+    // TODO: implement handling SLA warnings
+    // sort all machines in ascending order of utilization
+    // find a machine that can accommodate the load factor of i
+        // if found, migrate the workload to that specific machine
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
