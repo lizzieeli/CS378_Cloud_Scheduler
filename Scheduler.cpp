@@ -25,8 +25,11 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
-    for(unsigned i = 0; i < active_machines; i++)
+    cout << "initializing scheduler with " << Machine_GetTotal() << " machines." << endl;
+
+    for(unsigned i = 0; i < active_machines; i++) {
         vms.push_back(VM_Create(LINUX, X86));
+    }
     for(unsigned i = 0; i < active_machines; i++) {
         machines.push_back(MachineId_t(i));
     }    
@@ -34,19 +37,19 @@ void Scheduler::Init() {
         VM_Attach(vms[i], machines[i]);
     }
 
-    bool dynamic = false;
-    if(dynamic)
-        for(unsigned i = 0; i<4 ; i++)
-            for(unsigned j = 0; j < 8; j++)
-                // can't lie i don't see the point in having this line be in the double for loop
-                // if we are ignoring the core_id anyway and the helper basically sets all cpus
-                // on machine with id 0 to p3 state anyway with the single call??
-                Machine_SetCorePerformance(MachineId_t(0), j, P3);
+    // bool dynamic = false;
+    // if(dynamic)
+    //     for(unsigned i = 0; i<4 ; i++)
+    //         for(unsigned j = 0; j < 8; j++)
+    //             // can't lie i don't see the point in having this line be in the double for loop
+    //             // if we are ignoring the core_id anyway and the helper basically sets all cpus
+    //             // on machine with id 0 to p3 state anyway with the single call??
+    //             Machine_SetCorePerformance(MachineId_t(0), j, P3);
+
+
     // Turn off the ARM machines
-    // assuming we do this because we only created vm's that attched to x86 cpus
-    // also bc our only task class uses x86 cpus
     // all other machines at this point are inactive
-    for(unsigned i = 24; i < Machine_GetTotal(); i++)
+    for(unsigned i = active_machines; i < Machine_GetTotal(); i++)
         Machine_SetState(MachineId_t(i), S5);
 
     SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " and " + to_string(vms[1]), 3);
@@ -92,18 +95,26 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                     TaskInfo_t this_active_task_info = GetTaskInfo(this_VM_info.active_tasks[i]);
                     remaining_instr += this_active_task_info.remaining_instructions;
                 }
-                unsigned mips_rating = this_machine_info.performance[this_machine_info.s_state];
-                unsigned instr_possible_in_req_time = mips_rating * (this_task_info.arrival - this_task_info.completion);
-                unsigned total_resources = (this_machine_info.memory_size + instr_possible_in_req_time);
+                double mips_rating = this_machine_info.performance[this_machine_info.s_state] * 1000000;
+                double value = 1e-6;
+                double instr_possible_in_req_time = mips_rating * ((this_task_info.arrival - this_task_info.completion) / value);
+                double total_resources = instr_possible_in_req_time; // (this_machine_info.memory_size + instr_possible_in_req_time);
 
-                unsigned machine_util = (this_machine_info.memory_used + remaining_instr) / total_resources;
-                unsigned task_load_factor = (req_mem + this_task_info.total_instructions) / total_resources;
-
+                double machine_util = remaining_instr / total_resources; // (this_machine_info.memory_used + remaining_instr) / total_resources;
+                double task_load_factor = this_task_info.total_instructions / total_resources; // (req_mem + this_task_info.total_instructions) / total_resources;
+                cout << "remaining instr on machine: " << remaining_instr << endl;
+                cout << "this tasks's total instr: " << this_task_info.total_instructions << endl;
+                cout << "total isntr possible in requested time: " << instr_possible_in_req_time << endl;
+                cout << "current machine util: " << machine_util << endl;
+                cout << "current task load factor: " << task_load_factor << endl;
                 if (machine_util + task_load_factor < 1) {
                     // place workload on this VM
                     // giving every task a high priority for this one because greedy doesn't really
                     // specify a priority type? Maybe we can change later to prioritize shortest jobs first?
+                    cout << "Attaching task " << task_id << " to VM " << this_VM_id << endl;
+                    // cout << "VM" << endl;
                     VM_AddTask(this_VM_id, task_id, HIGH_PRIORITY);
+                    return;
                 }
             }
         }
