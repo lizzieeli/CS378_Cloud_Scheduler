@@ -9,7 +9,13 @@
 #include <algorithm>
 
 static bool migrating = false;
+static bool SLA_violation = false;
 static unsigned active_machines = 16;
+
+struct SimpleMachineInfo {
+    MachineId_t id;
+    double utilization;
+};
 
 /* Helper functions */
 static double GetTotalResources(MachineInfo_t m_info, TaskInfo_t t_info) {
@@ -48,7 +54,78 @@ static double GetTaskLoadFactor(MachineInfo_t m_info, TaskInfo_t t_info, unsigne
     return task_load_factor;
 }
 
+static vector<SimpleMachineInfo> SortMachinesByUtilization(vector<MachineId_t> machines, TaskInfo_t this_task_info, vector<VMId_t> vms) {
+    // sort all active machines in a set of ascending order of their utilization
+    vector<SimpleMachineInfo> sorted_active_machines;
+    for (MachineId_t id: machines) {
+        double this_utilization = GetMachineUtil(Machine_GetInfo(id), this_task_info, vms);
+        sorted_active_machines.push_back({id, this_utilization});
+    }
 
+    sort(sorted_active_machines.begin(), sorted_active_machines.end(),
+         [](const SimpleMachineInfo& a, SimpleMachineInfo& b){
+                return a.utilization < b.utilization;
+        });
+    return sorted_active_machines;
+}
+
+static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t> machines, vector<VMId_t> vms, VMId_t allocated_vm) {
+    // sort all machines in ascending order of utilization
+    TaskInfo_t this_task_info = GetTaskInfo(task_id);
+    vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
+
+
+    // find a machine that can accommodate the load factor of i, other than current machine that it is on
+    // if found, migrate the workload to that specific machine
+    // find literally any active machine that doesn't have this task,
+    // can handle this load factor, and matches the specs that this task requires
+    for (SimpleMachineInfo m_info: sorted_active_machines) {
+        MachineInfo_t temp_mach_info = Machine_GetInfo(m_info.id);
+        if ( (temp_mach_info.s_state == S0) && (this_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 1) && (this_task_info.required_cpu == temp_mach_info.cpu)) {
+            // matches specs
+            double this_task_util = GetTaskLoadFactor(temp_mach_info, this_task_info, this_task_info.required_memory);
+            if (m_info.utilization + this_task_util < 1) {
+                // can accommodate the load factor of this task, create a new VM, copy over all active tasks of this VM to the new one that will be migrated to this machine
+                // 2 cases: case 1 this task was not able to be allocated at all, in which case create new VM and add this as the first active task then migrate to another machine
+                // case 2 this task was allocated to a vm already BUT is not able to be run, in which case we create a new VM, copy over ALL active tasks, then migrate to another machine
+                VMId_t new_vm = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
+                VMInfo_t new_vm_info = VM_GetInfo(new_vm);
+                migrating = true;
+                if (allocated_vm != 0xDEADBEEF) {
+                    for (TaskId_t migrating_task: VM_GetInfo(allocated_vm).active_tasks) {
+                        new_vm_info.active_tasks.push_back(migrating_task);
+                    }
+                }
+                new_vm_info.active_tasks.push_back(task_id);
+                VM_Migrate(new_vm, m_info.id);
+                return true;
+            }
+        }
+    }
+    // if we made it here that means no active machine can handle our task's load factor so... wake up another machine and create a vm and add it there
+    if (active_machines != Machine_GetTotal()) {
+        int index = machines.size();
+        vms.push_back(VM_Create(LINUX, X86));
+        machines.push_back(MachineId_t(index));
+        VM_Attach(vms[vms.size() - 1], machines[machines.size() - 1]);
+        active_machines++;
+        return true;
+    }
+    return false;
+}
+
+static VMId_t FindVMAllocatedTo(TaskId_t task_id, vector<VMId_t> vms) {
+    for (VMId_t vm_id: vms) {
+        for (TaskId_t this_t_id: VM_GetInfo(vm_id).active_tasks) {
+            if (this_t_id == task_id) {
+                return vm_id;
+            }
+        }
+    }
+    return 0xDEADBEEF;
+}
+
+/* Internal/Private Scheduler Functions to implement */
 void Scheduler::Init() {
     /* This is essentially where the initialization of all the diff data structures and stuff will happen */
     
@@ -63,17 +140,23 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
+    // greedy does a "lazy" way of allocating, where we create one VM and attach to one machine until further notic
+    active_machines = 1;
+    vms.push_back(VM_Create(LINUX, X86));
+    machines.push_back(MachineId_t(0));
+    VM_Attach(vms[0], machines[0]);
+
     // cout << "initializing scheduler with " << Machine_GetTotal() << " machines." << endl;
 
-    for(unsigned i = 0; i < active_machines; i++) {
-        vms.push_back(VM_Create(LINUX, X86));
-    }
-    for(unsigned i = 0; i < active_machines; i++) {
-        machines.push_back(MachineId_t(i));
-    }    
-    for(unsigned i = 0; i < active_machines; i++) {
-        VM_Attach(vms[i], machines[i]);
-    }
+    // for(unsigned i = 0; i < active_machines; i++) {
+    //     vms.push_back(VM_Create(LINUX, X86));
+    // }
+    // for(unsigned i = 0; i < active_machines; i++) {
+    //     machines.push_back(MachineId_t(i));
+    // }    
+    // for(unsigned i = 0; i < active_machines; i++) {
+    //     VM_Attach(vms[i], machines[i]);
+    // }
 
     // bool dynamic = false;
     // if(dynamic)
@@ -87,17 +170,27 @@ void Scheduler::Init() {
 
     // Turn off the ARM machines
     // all other machines at this point are inactive
-    for(unsigned i = active_machines; i < Machine_GetTotal(); i++)
-        Machine_SetState(MachineId_t(i), S5);
+    // for(unsigned i = active_machines; i < Machine_GetTotal(); i++)
+    //     Machine_SetState(MachineId_t(i), S5);
 
     SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " and " + to_string(vms[1]), 3);
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
     // Update your data structure. The VM now can receive new tasks
+    vms.push_back(vm_id);
 }
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
+    if (SLA_violation == true) {
+        // we have been called by SLA warning, need to respond to the SLA violation specified by task_id
+        // cout << "We have reached an SLA Violation with task " << task_id << endl;
+        VMId_t VMThatHasTask = FindVMAllocatedTo(task_id, vms);
+        HandleSLAWarning(task_id, machines, vms, VMThatHasTask);
+        SLA_violation = false;
+        return;
+    }
+
     /* this is essentially where the new requests will be handled */
     // Get the task parameters
     bool GPUneeded = IsTaskGPUCapable(task_id);
@@ -122,21 +215,8 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                 double machine_util = GetMachineUtil(this_machine_info, this_task_info, vms);
                 double task_load_factor = GetTaskLoadFactor(this_machine_info, this_task_info, req_mem);
 
-                /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~Debugging comments~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-                // cout << "completion time of task : " << this_task_info.target_completion << endl;
-                // cout << "arrival time of task : " << this_task_info.arrival << endl;
-                // cout << "time remaining of this task in seconds: " << time_remaining << endl;
-                // cout << "remaining instr on machine: " << remaining_instr << endl;
-                // cout << "this tasks's total instr: " << this_task_info.total_instructions << endl;
-                // cout << "total isntr possible in requested time: " << instr_possible_in_req_time << endl;
-                // cout << "current machine util: " << machine_util << endl;
-                // cout << "current task load factor: " << task_load_factor << endl;
-                /* ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ */
-
                 if (machine_util + task_load_factor < 1) {
                     // place workload on this VM
-                    // giving every task a high priority for this one because greedy doesn't really
-                    // specify a priority type? Maybe we can change later to prioritize shortest jobs first?
                     // cout << "Attaching task " << task_id << " to VM " << this_VM_id << endl;
                     VM_AddTask(this_VM_id, task_id, HIGH_PRIORITY);
                     return;
@@ -171,24 +251,11 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
 
+    /*******************************************************
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
 
-    struct SimpleMachineInfo {
-        MachineId_t id;
-        double utilization;
-    };
-
     // sort all active machines in a set of ascending order of their utilization
-    vector<SimpleMachineInfo> sorted_active_machines;
-    for (MachineId_t id: machines) {
-        double this_utilization = GetMachineUtil(Machine_GetInfo(id), this_task_info, vms);
-        sorted_active_machines.push_back({id, this_utilization});
-    }
-
-    sort(sorted_active_machines.begin(), sorted_active_machines.end(),
-         [](const SimpleMachineInfo& a, SimpleMachineInfo& b){
-                return a.utilization < b.utilization;
-        });
+    vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
 
     int iteration = 0;
     // actually try to migrate tasks over if possible
@@ -206,7 +273,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
                         for (unsigned i = iteration; i < sorted_active_machines.size(); i++) {
                             // for each machine with greater util than this current one
                             MachineInfo_t temp_mach_info = Machine_GetInfo(sorted_active_machines[i].id);
-                            if (temp_task_info.required_cpu == temp_mach_info.cpu && (temp_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 0)) {
+                            if (temp_task_info.required_cpu == temp_mach_info.cpu && (temp_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 1)) {
                                 // only try to check util and migrate if the machine even matches the specs of this task
                                 double temp_util = GetMachineUtil(temp_mach_info, temp_task_info, vms);
                                 if (load_factor + temp_util < 1) {
@@ -215,10 +282,10 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
                                     for (VMId_t temp_vm: vms) {
                                         VMInfo_t temp_vm_info = VM_GetInfo(temp_vm);
                                         if (temp_vm_info.machine_id == sorted_active_machines[i].id && temp_task_info.required_vm == temp_vm_info.vm_type) {
-                                            migrating = true;
-                                            VM_RemoveTask(vm_id, t_id);
-                                            VM_AddTask(temp_vm_info.vm_id, t_id, HIGH_PRIORITY);
-                                            migrating = false;
+                                            // migrating = true;
+                                            // VM_RemoveTask(vm_id, t_id);
+                                            // VM_AddTask(temp_vm_info.vm_id, t_id, HIGH_PRIORITY);
+                                            // migrating = false;
                                             break;
                                         }
                                     }
@@ -234,13 +301,14 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
             }
         }
 
-        // at the end, if there are no more vm's on this machine then turn it off
-        if ((Machine_GetInfo(mach.id)).active_vms == 0){
-            // no more vms on this machine so turn it off and continue
-            Machine_SetState(mach.id, S5);
-        }
+        // // at the end, if there are no more vm's on this machine then turn it off
+        // if ((Machine_GetInfo(mach.id)).active_vms == 0){
+        //     // no more vms on this machine so turn it off and continue
+        //     Machine_SetState(mach.id, S5);
+        // }
         iteration++;
     }
+    **********************************************************/
 }
 
 // Public interface below
@@ -278,12 +346,12 @@ void SchedulerCheck(Time_t time) {
     // This function is called periodically by the simulator, no specific event
     SimOutput("SchedulerCheck(): SchedulerCheck() called at " + to_string(time), 4);
     Scheduler.PeriodicCheck(time);
-    static unsigned counts = 0;
-    counts++;
-    if(counts == 10) {
-        migrating = true;
-        VM_Migrate(1, 9);
-    }
+    // static unsigned counts = 0;
+    // counts++;
+    // if(counts == 10) {
+    //     migrating = true;
+    //     VM_Migrate(1, 9);
+    // }
 }
 
 void SimulationComplete(Time_t time) {
@@ -300,10 +368,9 @@ void SimulationComplete(Time_t time) {
 }
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
-    // TODO: implement handling SLA warnings
-    // sort all machines in ascending order of utilization
-    // find a machine that can accommodate the load factor of i
-        // if found, migrate the workload to that specific machine
+    // call a function that will handle SLA warnings internally by the scheduler
+    SLA_violation = true;
+    Scheduler.NewTask(time, task_id);
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
