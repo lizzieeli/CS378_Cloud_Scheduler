@@ -10,7 +10,7 @@
 
 static bool migrating = false;
 static bool SLA_violation = false;
-static unsigned active_machines = 16;
+static unsigned active_machines = 1;
 
 struct SimpleMachineInfo {
     MachineId_t id;
@@ -74,41 +74,52 @@ static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t> machines, vec
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
     vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
 
-
+    unsigned current_index = (allocated_vm != 0xDEADBEEF) ? VM_GetInfo(allocated_vm).machine_id : 0xDEADBEEF;
     // find a machine that can accommodate the load factor of i, other than current machine that it is on
     // if found, migrate the workload to that specific machine
     // find literally any active machine that doesn't have this task,
     // can handle this load factor, and matches the specs that this task requires
-    for (SimpleMachineInfo m_info: sorted_active_machines) {
+    if (allocated_vm != 0xDEADBEEF) {
+        for (SimpleMachineInfo m_info: sorted_active_machines) {
         MachineInfo_t temp_mach_info = Machine_GetInfo(m_info.id);
-        if ( (temp_mach_info.s_state == S0) && (this_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 1) && (this_task_info.required_cpu == temp_mach_info.cpu)) {
-            // matches specs
+        // cout << "current machine this task is on: " << current_index << endl;
+        // cout << "current machine being looked at: " << m_info.id << endl;
+        if ((current_index != m_info.id) && (temp_mach_info.s_state == S0) 
+                && (this_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 1) && (this_task_info.required_cpu == temp_mach_info.cpu)) {
             double this_task_util = GetTaskLoadFactor(temp_mach_info, this_task_info, this_task_info.required_memory);
             if (m_info.utilization + this_task_util < 1) {
-                // can accommodate the load factor of this task, create a new VM, copy over all active tasks of this VM to the new one that will be migrated to this machine
-                // 2 cases: case 1 this task was not able to be allocated at all, in which case create new VM and add this as the first active task then migrate to another machine
-                // case 2 this task was allocated to a vm already BUT is not able to be run, in which case we create a new VM, copy over ALL active tasks, then migrate to another machine
                 VMId_t new_vm = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
                 VMInfo_t new_vm_info = VM_GetInfo(new_vm);
                 migrating = true;
-                if (allocated_vm != 0xDEADBEEF) {
-                    for (TaskId_t migrating_task: VM_GetInfo(allocated_vm).active_tasks) {
-                        new_vm_info.active_tasks.push_back(migrating_task);
-                    }
+                cout << "migrating newly created vm from machine " << VM_GetInfo(allocated_vm).machine_id << " to machine " << m_info.id << endl;
+                for (TaskId_t migrating_task: VM_GetInfo(allocated_vm).active_tasks) {
+                    new_vm_info.active_tasks.push_back(migrating_task);
                 }
                 new_vm_info.active_tasks.push_back(task_id);
+                VM_Attach(new_vm, VM_GetInfo(allocated_vm).machine_id);
                 VM_Migrate(new_vm, m_info.id);
                 return true;
+                // else {
+                //     cout << "just adding newly created vm to machine " << m_info.id << endl;
+                //     new_vm_info.active_tasks.push_back(task_id);
+                //     VM_Attach(new_vm, m_info.id);
+                // }
             }
         }
     }
+    }
     // if we made it here that means no active machine can handle our task's load factor so... wake up another machine and create a vm and add it there
     if (active_machines != Machine_GetTotal()) {
+        migrating = true;
         int index = machines.size();
-        vms.push_back(VM_Create(LINUX, X86));
+        VMId_t new_vm = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
+        vms.push_back(new_vm);
         machines.push_back(MachineId_t(index));
-        VM_Attach(vms[vms.size() - 1], machines[machines.size() - 1]);
+        VM_Attach(new_vm, MachineId_t(index));
+        VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
         active_machines++;
+        migrating = false;
+        cout << "making new vm on entirely new machine. vm id is " << new_vm << " and machine id is " << index << endl;
         return true;
     }
     return false;
@@ -184,10 +195,11 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     if (SLA_violation == true) {
         // we have been called by SLA warning, need to respond to the SLA violation specified by task_id
-        // cout << "We have reached an SLA Violation with task " << task_id << endl;
+        cout << "We have reached an SLA Violation with task " << task_id << endl;
         VMId_t VMThatHasTask = FindVMAllocatedTo(task_id, vms);
-        HandleSLAWarning(task_id, machines, vms, VMThatHasTask);
+        bool success = HandleSLAWarning(task_id, machines, vms, VMThatHasTask);
         SLA_violation = false;
+        cout << "success? " << success << endl;
         return;
     }
 
@@ -217,7 +229,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
 
                 if (machine_util + task_load_factor < 1) {
                     // place workload on this VM
-                    // cout << "Attaching task " << task_id << " to VM " << this_VM_id << endl;
+                    cout << "Attaching task " << task_id << " to VM " << this_VM_id << " on machine " << this_VM_info.machine_id << endl;
                     VM_AddTask(this_VM_id, task_id, HIGH_PRIORITY);
                     return;
                 }
