@@ -6,9 +6,20 @@
 //
 
 #include "Scheduler.hpp"
+#include <map>
+#include <unordered_map>
+#include <algorithm>
 
 static bool migrating = false;
-static unsigned active_machines = 16;
+static unsigned active_machines = 16; // there are 16 machines of CPU type 3
+
+map<MachineId_t, bool> ARMTotal;
+map<MachineId_t, bool> POWERTotal;
+map<MachineId_t, bool> RISCVTotal;
+map<MachineId_t, bool> X86Total;
+
+unordered_map<MachineId_t, uint64_t> MachinesSortedByEnergy;
+
 
 void Scheduler::Init() {
     // Find the parameters of the clusters
@@ -21,25 +32,38 @@ void Scheduler::Init() {
     // 
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
-    for(unsigned i = 0; i < active_machines; i++)
-        vms.push_back(VM_Create(LINUX, X86));
-    for(unsigned i = 0; i < active_machines; i++) {
-        machines.push_back(MachineId_t(i));
-    }    
-    for(unsigned i = 0; i < active_machines; i++) {
-        VM_Attach(vms[i], machines[i]);
+
+    unsigned int total_machines = Machine_GetTotal();
+    for (unsigned i = 0; i < total_machines; i++) {
+        MachineId_t m_id = MachineId_t(i);
+        MachineInfo_t m_info = Machine_GetInfo(m_id);
+        switch (m_info.cpu) {
+            case ARM:
+                ARMTotal[m_id] = m_info.gpus;
+                break;
+            case POWER:
+                POWERTotal[m_id] = m_info.gpus;
+                break;
+            case RISCV:
+                RISCVTotal[m_id] = m_info.gpus;
+                break;
+            case X86:
+                X86Total[m_id] = m_info.gpus;
+                break;
+            default:
+                break;
+        }
+        // all machines should be low energy consumption atp
+        MachinesSortedByEnergy[m_id] = m_info.energy_consumed;
     }
+    sort(MachinesSortedByEnergy.begin(), MachinesSortedByEnergy.end(),
+        [](const uint64_t& a, uint64_t& b){
+            return a < b;
+        });
 
-    bool dynamic = false;
-    if(dynamic)
-        for(unsigned i = 0; i<4 ; i++)
-            for(unsigned j = 0; j < 8; j++)
-                Machine_SetCorePerformance(MachineId_t(0), j, P3);
-    // Turn off the ARM machines
-    for(unsigned i = 24; i < Machine_GetTotal(); i++)
-        Machine_SetState(MachineId_t(i), S5);
+    
 
-    SimOutput("Scheduler::Init(): VM ids are " + to_string(vms[0]) + " ahd " + to_string(vms[1]), 3);
+
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
