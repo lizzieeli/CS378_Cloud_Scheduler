@@ -47,7 +47,7 @@ static Time_t FindRemainingExecTime(VMId_t this_vm){
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
     Time_t remaining_exec_time = (total_remaining_instr / instructions_per_sec) * 1000000; // conversion from seconds to microseconds
-    return remaining_exec_time;
+    return remaining_exec_time; // in microseconds
 }
 
 void Scheduler::Init() {
@@ -99,23 +99,9 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 }
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    // Get the task parameters
-    //  IsGPUCapable(task_id);
-    //  GetMemory(task_id);
-    //  RequiredVMType(task_id);
-    //  RequiredSLA(task_id);
-    //  RequiredCPUType(task_id);
-    // Decide to attach the task to an existing VM, 
-    //      vm.AddTask(taskid, Priority_T priority); or
-    // Create a new VM, attach the VM to a machine
-    //      VM vm(type of the VM)
-    //      vm.Attach(machine_id);
-    //      vm.AddTask(taskid, Priority_t priority) or
     // Turn on a machine, create a new VM, attach it to the VM, then add the task
-    //
     // Turn on a machine, migrate an existing VM from a loaded machine....
 
-    
     vector<VMExecTimePair> vm_sorted_exec_time;
 
     // sort all active (not migrating) VMs that are on active (not state changing) machines by their pending execution times
@@ -138,6 +124,8 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             return a.pending_execution_time < b.pending_execution_time;
         });
 
+    // now, based on this list, pick the next compatible vm with the lowest pending execution time
+    VMId_t selected_v = vm_sorted_exec_time[0].vm_id;
     
 
     Priority_t priority = (task_id == 0 || task_id == 64)? HIGH_PRIORITY : MID_PRIORITY;
