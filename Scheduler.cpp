@@ -11,25 +11,28 @@
 #include <algorithm>
 
 static bool migrating = false;
-static unsigned active_machines = 16; // there are 16 machines of CPU type 3
+static unsigned active_machines = 16; 
 
-map<MachineId_t, bool> ARMTotal;
-map<MachineId_t, bool> POWERTotal;
-map<MachineId_t, bool> RISCVTotal;
-map<MachineId_t, bool> X86Total;
+struct MachineStatePair {
+    MachineId_t id;
+    MachineState_t s_state;
+};
 
-unordered_map<MachineId_t, uint64_t> MachinesSortedByEnergy;
+struct MachineMemoryPair {
+    MachineId_t id;
+    unsigned memory_available;
+};
+
+vector<MachineStatePair> ARMTotal;
+vector<MachineStatePair> POWERTotal;
+vector<MachineStatePair> RISCVTotal;
+vector<MachineStatePair> X86Total;
+
+vector<MachineMemoryPair> sorted_machines_by_mem;
 
 
 void Scheduler::Init() {
     // Find the parameters of the clusters
-    // Get the total number of machines
-    // For each machine:
-    //      Get the type of the machine
-    //      Get the memory of the machine
-    //      Get the number of CPUs
-    //      Get if there is a GPU or not
-    // 
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
@@ -39,30 +42,36 @@ void Scheduler::Init() {
         MachineInfo_t m_info = Machine_GetInfo(m_id);
         switch (m_info.cpu) {
             case ARM:
-                ARMTotal[m_id] = m_info.gpus;
+                ARMTotal.push_back({m_id, m_info.s_state});
                 break;
             case POWER:
-                POWERTotal[m_id] = m_info.gpus;
+                POWERTotal.push_back({m_id, m_info.s_state});
                 break;
             case RISCV:
-                RISCVTotal[m_id] = m_info.gpus;
+                RISCVTotal.push_back({m_id, m_info.s_state});
                 break;
             case X86:
-                X86Total[m_id] = m_info.gpus;
+                X86Total.push_back({m_id, m_info.s_state});
                 break;
             default:
                 break;
         }
-        // all machines should be low energy consumption atp
-        MachinesSortedByEnergy[m_id] = m_info.energy_consumed;
+        // all machines should have low memory usage
+        unsigned int mem_available = m_info.memory_size - m_info.memory_used;
+        sorted_machines_by_mem.push_back({m_id, mem_available});
     }
-    sort(MachinesSortedByEnergy.begin(), MachinesSortedByEnergy.end(),
-        [](const uint64_t& a, uint64_t& b){
-            return a < b;
+
+    // sort memory available by most amount to least amount
+    sort(sorted_machines_by_mem.begin(), sorted_machines_by_mem.end(),
+        [](const MachineMemoryPair& a, MachineMemoryPair& b){
+            return a.memory_available > b.memory_available;
         });
 
-    
-
+    // initialize 1 VM to start for now
+    VMId_t X86_vm = VM_Create(LINUX, X86);
+    vms.push_back(X86_vm);
+    machines.push_back(X86Total[0].id);
+    VM_Attach(X86_vm, X86Total[0].id);
 
 }
 
@@ -93,7 +102,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         VM_AddTask(vms[0], task_id, priority);
     }
     else {
-        VM_AddTask(vms[task_id % active_machines], task_id, priority);
+        VM_AddTask(vms[0], task_id, priority);
     }// Skeleton code, you need to change it according to your algorithm
 }
 
@@ -158,12 +167,6 @@ void SchedulerCheck(Time_t time) {
     // This function is called periodically by the simulator, no specific event
     SimOutput("SchedulerCheck(): SchedulerCheck() called at " + to_string(time), 4);
     Scheduler.PeriodicCheck(time);
-    static unsigned counts = 0;
-    counts++;
-    if(counts == 10) {
-        migrating = true;
-        VM_Migrate(1, 9);
-    }
 }
 
 void SimulationComplete(Time_t time) {
