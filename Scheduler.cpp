@@ -11,7 +11,6 @@
 #include <algorithm>
 
 static bool migrating = false;
-static unsigned active_machines = 16; 
 
 struct MachineStatePair {
     MachineId_t id;
@@ -23,13 +22,33 @@ struct MachineMemoryPair {
     unsigned memory_available;
 };
 
+struct VMExecTimePair {
+    VMId_t vm_id;
+    Time_t pending_execution_time;
+};
+
 vector<MachineStatePair> ARMTotal;
 vector<MachineStatePair> POWERTotal;
 vector<MachineStatePair> RISCVTotal;
 vector<MachineStatePair> X86Total;
 
 vector<MachineMemoryPair> sorted_machines_by_mem;
+vector<VMId_t> migrating_VMs;
+vector<MachineId_t> state_changing_machines;
 
+/* helper functions */
+static Time_t FindRemainingExecTime(VMId_t this_vm){
+    VMInfo_t vm_info = VM_GetInfo(this_vm);
+    uint64_t total_remaining_instr = 0;
+    for (TaskId_t active_task: vm_info.active_tasks) {
+        total_remaining_instr += GetTaskInfo(active_task).remaining_instructions;
+    }
+    MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
+    unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
+    // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
+    Time_t remaining_exec_time = (total_remaining_instr / instructions_per_sec) * 1000000; // conversion from seconds to microseconds
+    return remaining_exec_time;
+}
 
 void Scheduler::Init() {
     // Find the parameters of the clusters
@@ -95,8 +114,32 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, create a new VM, attach it to the VM, then add the task
     //
     // Turn on a machine, migrate an existing VM from a loaded machine....
-    //
-    // Other possibilities as desired
+
+    
+    vector<VMExecTimePair> vm_sorted_exec_time;
+
+    // sort all active (not migrating) VMs that are on active (not state changing) machines by their pending execution times
+    for (VMId_t vm_id: vms) {
+        VMInfo_t vm_info = VM_GetInfo(vm_id);
+        auto it1 = find(migrating_VMs.begin(), migrating_VMs.end(), vm_id);
+        auto it2 = find(state_changing_machines.begin(), state_changing_machines.end(), vm_info.machine_id);
+        if (it1 == migrating_VMs.end() && it2 == state_changing_machines.end()) {
+            // this vm is currently not migrating and the machine it is on is not changing state either, so we 
+            // should consider it for our list of available vm's from list of active vms, figure out the 
+            // remaining execution time from all of the vm's active tasks
+            Time_t pending_execution_time = FindRemainingExecTime(vm_id);
+            vm_sorted_exec_time.push_back({vm_id, pending_execution_time});
+        }
+    }
+
+    // now sort the list by ascending execution times
+    sort(vm_sorted_exec_time.begin(), vm_sorted_exec_time.end(),
+        [](const VMExecTimePair& a, VMExecTimePair& b){
+            return a.pending_execution_time < b.pending_execution_time;
+        });
+
+    
+
     Priority_t priority = (task_id == 0 || task_id == 64)? HIGH_PRIORITY : MID_PRIORITY;
     if(migrating) {
         VM_AddTask(vms[0], task_id, priority);
