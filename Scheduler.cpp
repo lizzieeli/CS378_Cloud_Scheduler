@@ -56,7 +56,7 @@ static double GetTaskLoadFactor(MachineInfo_t m_info, TaskInfo_t t_info, unsigne
     return task_load_factor;
 }
 
-static vector<SimpleMachineInfo> SortMachinesByUtilization(vector<MachineId_t> machines, TaskInfo_t this_task_info, vector<VMId_t> vms) {
+static vector<SimpleMachineInfo> SortMachinesByUtilization(vector<MachineId_t>& machines, TaskInfo_t this_task_info, vector<VMId_t> vms) {
     // sort all active machines in a set of ascending order of their utilization
     vector<SimpleMachineInfo> sorted_active_machines;
     for (MachineId_t id: machines) {
@@ -71,42 +71,46 @@ static vector<SimpleMachineInfo> SortMachinesByUtilization(vector<MachineId_t> m
     return sorted_active_machines;
 }
 
-static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t> machines, vector<VMId_t> vms, VMId_t allocated_vm) {
+static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t>& machines, vector<VMId_t> vms, VMId_t allocated_vm) {
     // sort all machines in ascending order of utilization
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
     vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
     bool allocation_success = false;
+
     for (unsigned i = 0; i < sorted_active_machines.size(); i++) {
         MachineId_t temp_m_id = sorted_active_machines[i].id;
         if (VM_GetInfo(allocated_vm).machine_id != temp_m_id) {
             MachineInfo_t m_info = Machine_GetInfo(temp_m_id);
             double m_util = GetMachineUtil(m_info, this_task_info, vms);
             double t_load = GetTaskLoadFactor(m_info, this_task_info, this_task_info.required_memory); 
-            if (m_util + t_load < 1) {
+            if (m_util + t_load < 1) { // we found a machine that can accept this task
                 migrating = true;
                 VM_Migrate(allocated_vm, temp_m_id);
                 allocation_success = true;
+                MigrationDone(Now(), allocated_vm);
+                break;
             }
         }
     }
     // need to wake up new machine and put a new VM with this task on it if possible
-    if (allocation_success == false) {
-        MachineId_t new_machine_id = MachineId_t(active_machines);
-        if (Machine_GetInfo(new_machine_id).cpu == this_task_info.required_cpu) {
-            VMId_t new_vm_id = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
-            active_machines++;
-            cout << "new machine being turned on's id is " << new_machine_id << endl;
-            cout << "new machine's CPU is " << Machine_GetInfo(new_machine_id).cpu << endl;
-            cout << "required CPU for task is " << this_task_info.required_cpu << endl;
-            cout << "required VM for task is " << this_task_info.required_vm << endl;
-            VM_Attach(new_vm_id, new_machine_id);
-            VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
-            task_to_vm[task_id] = new_vm_id;
-            allocation_success = true;
-        }
-    }
+    if (allocation_success) return true;
+    
+    MachineId_t new_machine_id = MachineId_t(active_machines);
+    if (Machine_GetInfo(new_machine_id).cpu != this_task_info.required_cpu) return false;
+    
+    machines.push_back(new_machine_id); // need to check if there is another machine available
+    active_machines++;
+    VMId_t new_vm_id = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
+    vms.push_back(new_vm_id);
+    cout << "new machine being turned on's id is " << new_machine_id << endl;
+    cout << "new machine's CPU is " << Machine_GetInfo(new_machine_id).cpu << endl;
+    cout << "required CPU for task is " << this_task_info.required_cpu << endl;
+    cout << "required VM for task is " << this_task_info.required_vm << endl;
+    VM_Attach(new_vm_id, new_machine_id);
+    VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
+    task_to_vm[task_id] = new_vm_id;
 
-    return allocation_success;
+    return true;
 }
 
 /* Internal/Private Scheduler Functions to implement */
@@ -160,15 +164,15 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     unsigned req_mem = GetTaskMemory(task_id);
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
 
-    for (unsigned i = 0; i < active_machines; i++) {
+    for (unsigned i = 0; i < vms.size(); i++) { // TODO: why is this active_machines not vms.size()
         VMId_t this_VM_id = vms[i];
         VMInfo_t this_VM_info = VM_GetInfo(this_VM_id);
         if (this_VM_info.vm_type == req_VM) {
-            MachineId_t this_machine_id= this_VM_info.machine_id;
+            MachineId_t this_machine_id = this_VM_info.machine_id;
             MachineInfo_t this_machine_info = Machine_GetInfo(this_machine_id);
             CPUType_t this_machine_CPU = Machine_GetCPUType(this_machine_id);
 
-            if ((this_machine_info.s_state == S0) && (this_machine_CPU == req_CPU) && (GPUneeded? (this_machine_info.gpus? 1 : 0) : 1)) {
+            if ((this_machine_info.s_state == S0) && (this_machine_CPU == req_CPU)) { // && (!GPUneeded || (GPUneeded && this_machine_info.gpus))) {
                 // we know that we meet base level HW requirements
                 // now look at utilization and load factor
 
