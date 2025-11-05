@@ -56,62 +56,98 @@ static double GetTaskLoadFactor(MachineInfo_t m_info, TaskInfo_t t_info, unsigne
     return task_load_factor;
 }
 
-static vector<SimpleMachineInfo> SortMachinesByUtilization(vector<MachineId_t>& machines, TaskInfo_t this_task_info, vector<VMId_t> vms) {
-    // sort all active machines in a set of ascending order of their utilization
-    vector<SimpleMachineInfo> sorted_active_machines;
-    for (MachineId_t id: machines) {
-        double this_utilization = GetMachineUtil(Machine_GetInfo(id), this_task_info, vms);
-        sorted_active_machines.push_back({id, this_utilization});
-    }
+ static double GetCPUUtil(MachineInfo_t m_info, vector<VMId_t>& vms) {
+    double total_instr_remaining = 0;
 
-    sort(sorted_active_machines.begin(), sorted_active_machines.end(),
-         [](const SimpleMachineInfo& a, SimpleMachineInfo& b){
-                return a.utilization < b.utilization;
-        });
-    return sorted_active_machines;
-}
+    for (VMId_t vm_id : vms) {
+        VMInfo_t vm_info = VM_GetInfo(vm_id);
+        if (vm_info.machine_id != m_info.machine_id)
+            continue;
 
-static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t>& machines, vector<VMId_t> vms, VMId_t allocated_vm) {
-    // sort all machines in ascending order of utilization
-    TaskInfo_t this_task_info = GetTaskInfo(task_id);
-    vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
-    bool allocation_success = false;
-
-    for (unsigned i = 0; i < sorted_active_machines.size(); i++) {
-        MachineId_t temp_m_id = sorted_active_machines[i].id;
-        if (VM_GetInfo(allocated_vm).machine_id != temp_m_id) {
-            MachineInfo_t m_info = Machine_GetInfo(temp_m_id);
-            double m_util = GetMachineUtil(m_info, this_task_info, vms);
-            double t_load = GetTaskLoadFactor(m_info, this_task_info, this_task_info.required_memory); 
-            if (m_util + t_load < 1) { // we found a machine that can accept this task
-                migrating = true;
-                VM_Migrate(allocated_vm, temp_m_id);
-                allocation_success = true;
-                MigrationDone(Now(), allocated_vm);
-                break;
-            }
+        for (TaskId_t t_id : vm_info.active_tasks) {
+            TaskInfo_t t_info = GetTaskInfo(t_id);
+            total_instr_remaining += t_info.remaining_instructions;
         }
     }
-    // need to wake up new machine and put a new VM with this task on it if possible
-    if (allocation_success) return true;
-    
-    MachineId_t new_machine_id = MachineId_t(active_machines);
-    if (Machine_GetInfo(new_machine_id).cpu != this_task_info.required_cpu) return false;
-    
-    machines.push_back(new_machine_id); // need to check if there is another machine available
-    active_machines++;
-    VMId_t new_vm_id = VM_Create(this_task_info.required_vm, this_task_info.required_cpu);
-    vms.push_back(new_vm_id);
-    cout << "new machine being turned on's id is " << new_machine_id << endl;
-    cout << "new machine's CPU is " << Machine_GetInfo(new_machine_id).cpu << endl;
-    cout << "required CPU for task is " << this_task_info.required_cpu << endl;
-    cout << "required VM for task is " << this_task_info.required_vm << endl;
-    VM_Attach(new_vm_id, new_machine_id);
-    VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
-    task_to_vm[task_id] = new_vm_id;
 
-    return true;
+    // Convert instructions to a fraction of machine capacity per second
+    double machine_capacity = m_info.num_cpus * m_info.performance[S0] * 1e6; // instructions per second
+    return total_instr_remaining / machine_capacity;
 }
+
+static double GetMemUtil(MachineInfo_t m_info, TaskInfo_t t_info) {
+    // current memory used plus memory requested by new task
+    double mem_util = double(m_info.memory_used + t_info.required_memory) / m_info.memory_size;
+    return mem_util;
+}
+
+static vector<SimpleMachineInfo> SortMachinesByCPU(
+    vector<MachineId_t>& machines,
+    vector<VMId_t>& vms
+) {
+    vector<SimpleMachineInfo> sorted;
+    for (MachineId_t id : machines) {
+        MachineInfo_t m_info = Machine_GetInfo(id);
+        double cpu_util = GetCPUUtil(m_info, vms);
+        sorted.push_back({id, cpu_util});
+    }
+
+    sort(sorted.begin(), sorted.end(),
+         [](const SimpleMachineInfo& a, const SimpleMachineInfo& b) {
+             return a.utilization < b.utilization;
+         });
+
+    return sorted;
+}
+
+
+
+// static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t>& machines, vector<VMId_t>& vms, VMId_t allocated_vm) {
+//     // sort all machines in ascending order of utilization
+//     TaskInfo_t this_task_info = GetTaskInfo(task_id);
+//     //vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
+//     vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByCPU(machines, vms);
+
+//     bool allocation_success = false;
+
+//     for (unsigned i = 0; i < sorted_active_machines.size(); i++) {
+//         MachineId_t temp_m_id = sorted_active_machines[i].id;
+//         if (VM_GetInfo(allocated_vm).machine_id != temp_m_id) {
+//             MachineInfo_t m_info = Machine_GetInfo(temp_m_id);
+//             double m_util = GetMachineUtil(m_info, this_task_info, vms);
+//             double t_load = GetTaskLoadFactor(m_info, this_task_info, this_task_info.required_memory); 
+//             if (m_util + t_load < 1) { // we found a machine that can accept this task
+//                 migrating = true;
+//                 VM_Migrate(allocated_vm, temp_m_id);
+//                 allocation_success = true;
+//                 MigrationDone(Now(), allocated_vm);
+//                 break;
+//             }
+//         }
+//     }
+    
+    // // adds new machine & vm to active queue
+    // unsigned total = Machine_GetTotal();
+    // for (unsigned i = 0; i < total; i++) {
+    //     MachineInfo_t m = Machine_GetInfo(i);
+    //     machines.push_back(i);
+    //     active_machines++;
+    //     VMId_t new_vm_id = VM_Create(this_task_info.required_vm,
+    //                                 this_task_info.required_cpu);
+    //     vms.push_back(new_vm_id);
+    //     VM_Attach(new_vm_id, i);
+    //     VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
+
+    //     task_to_vm[task_id] = new_vm_id;
+
+    //     cout << "Powered ON machine " << i << " and placed task " << task_id
+    //         << " on VM " << new_vm_id << endl;
+
+    //     return true;
+    // }
+    // return false; // no machines available to power on
+
+// }
 
 /* Internal/Private Scheduler Functions to implement */
 void Scheduler::Init() {
@@ -140,56 +176,9 @@ void Scheduler::Init() {
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
     // Update your data structure. The VM now can receive new tasks
-    vms.push_back(vm_id);
+    //vms.push_back(vm_id);
 }
 
-void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    if (SLA_violation == true) {
-        // we have been called by SLA warning, need to respond to the SLA violation specified by task_id
-        cout << "We have reached an SLA Violation with task " << task_id << endl;
-        VMId_t VMThatHasViolation = task_to_vm[task_id];
-        cout << "VM that has this violation of a task is " << VMThatHasViolation << endl;
-        bool success = HandleSLAWarning(task_id, machines, vms, VMThatHasViolation);
-        SLA_violation = false;
-        cout << "success? " << success << endl;
-        return;
-    }
-
-    /* this is essentially where the new requests will be handled */
-    // Get the task parameters
-    bool GPUneeded = IsTaskGPUCapable(task_id);
-    CPUType_t req_CPU = RequiredCPUType(task_id);
-    // SLAType_t req_SLA = RequiredSLA(task_id);
-    VMType_t req_VM = RequiredVMType(task_id);
-    unsigned req_mem = GetTaskMemory(task_id);
-    TaskInfo_t this_task_info = GetTaskInfo(task_id);
-
-    for (unsigned i = 0; i < vms.size(); i++) { // TODO: why is this active_machines not vms.size()
-        VMId_t this_VM_id = vms[i];
-        VMInfo_t this_VM_info = VM_GetInfo(this_VM_id);
-        if (this_VM_info.vm_type == req_VM) {
-            MachineId_t this_machine_id = this_VM_info.machine_id;
-            MachineInfo_t this_machine_info = Machine_GetInfo(this_machine_id);
-            CPUType_t this_machine_CPU = Machine_GetCPUType(this_machine_id);
-
-            if ((this_machine_info.s_state == S0) && (this_machine_CPU == req_CPU)) { // && (!GPUneeded || (GPUneeded && this_machine_info.gpus))) {
-                // we know that we meet base level HW requirements
-                // now look at utilization and load factor
-
-                double machine_util = GetMachineUtil(this_machine_info, this_task_info, vms);
-                double task_load_factor = GetTaskLoadFactor(this_machine_info, this_task_info, req_mem);
-
-                if (machine_util + task_load_factor < 1) {
-                    // place workload on this VM
-                    cout << "Attaching task " << task_id << " to VM " << this_VM_id << " on machine " << this_VM_info.machine_id << endl;
-                    VM_AddTask(this_VM_id, task_id, HIGH_PRIORITY);
-                    task_to_vm[task_id] = this_VM_id;
-                    return;
-                }
-            }
-        }
-    }
-}
 
 void Scheduler::PeriodicCheck(Time_t now) {
     // This method should be called from SchedulerCheck()
@@ -219,83 +208,102 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
     VMId_t VMThatHasTask = task_to_vm[task_id];
     task_to_vm.erase(task_id);
+}
 
-    // sort all active machines in a set of ascending order of their utilization
-    vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
+// Static helper function to add a new machine & VM if no existing VM can take the task
+static void AddActiveMachine(TaskId_t task_id, TaskInfo_t task_info,
+                             std::vector<MachineId_t>& machines,
+                             std::vector<VMId_t>& vms,
+                             std::unordered_map<TaskId_t, VMId_t>& task_to_vm,
+                             unsigned& active_machines) {
+    unsigned total = Machine_GetTotal();
 
-    for (unsigned j = 0; j < sorted_active_machines.size(); j++) {
-        MachineInfo_t this_m_info = Machine_GetInfo(sorted_active_machines[j].id);
-        for (unsigned i = 0; i < this_m_info.active_vms; i++) {
-            for (unsigned k = j; k < sorted_active_machines.size(); k++) {
-                MachineInfo_t higher_util_m_info = Machine_GetInfo(sorted_active_machines[k].id);
-                if (this_m_info.cpu == higher_util_m_info.cpu && this_m_info.gpus == higher_util_m_info.gpus) {
-                    // double higher_util_m_util = GetMachineUtil(higher_util_m_info, this_task_info, vms);
-                    // double this_task_load_factor = GetTaskLoadFactor(higher_util_m_info, this_task_info, this_task_info.required_memory);
-                    // if (higher_util_m_util + this_task_load_factor < 1) {
-                    //     migrating = true;
-                    //     VM_Migrate(VMThatHasTask, higher_util_m_info.machine_id);
-                    // }
-                }
+    for (unsigned i = 0; i < total; i++) {
+        // Skip machines already active
+        if (std::find(machines.begin(), machines.end(), i) != machines.end())
+            continue;
+
+        MachineInfo_t m_info = Machine_GetInfo(i);
+
+        // Check CPU compatibility
+        if (m_info.cpu != task_info.required_cpu)
+            continue;
+
+        machines.push_back(i);
+        active_machines++;
+
+        VMId_t new_vm_id = VM_Create(task_info.required_vm, task_info.required_cpu);
+        vms.push_back(new_vm_id);
+        VM_Attach(new_vm_id, i);
+        VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
+
+        task_to_vm[task_id] = new_vm_id;
+
+        cout << "Activated machine " << i << " and placed task " << task_id
+                  << " on VM " << new_vm_id << endl;
+        return;
+    }
+
+    // cout << "No more machines available to activate for task " << task_id << endl;
+    SLA_violation = true;
+}
+
+// Greedy machine-first NewTask implementation
+void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
+    // if (SLA_violation) {
+    //     std::cout << "SLA Violation detected for task " << task_id << std::endl;
+    //     VMId_t VMThatHasViolation = task_to_vm[task_id];
+    //     HandleSLAWarning(task_id, machines, vms, VMThatHasViolation);
+    //     SLA_violation = false;
+    //     return;
+    // }
+
+    TaskInfo_t this_task_info = GetTaskInfo(task_id);
+    CPUType_t req_CPU = RequiredCPUType(task_id);
+    VMType_t req_VM = RequiredVMType(task_id);
+    unsigned req_mem = GetTaskMemory(task_id);
+
+    // Step 1: sort active machines by utilization
+    //auto sorted_machines = SortMachinesByUtilization(machines, this_task_info, vms);
+    vector<SimpleMachineInfo> sorted_machines = SortMachinesByCPU(machines, vms);
+
+
+    // Step 2: Greedy assignment — machine first, then VM
+    for (auto& entry : sorted_machines) {
+        MachineId_t machine_id = entry.id;
+        MachineInfo_t mach_info = Machine_GetInfo(machine_id);
+    
+        if (mach_info.cpu != req_CPU)
+            continue;
+        for (VMId_t vm_id : vms) {
+            VMInfo_t vm_info = VM_GetInfo(vm_id);
+
+            if (vm_info.machine_id != machine_id)
+                continue;
+
+            if (vm_info.vm_type != req_VM)
+                continue;
+
+            double cpu_util = GetCPUUtil(mach_info, vms);
+            double mem_util = GetMemUtil(mach_info, this_task_info);
+
+            if (cpu_util < 1.0 && mem_util < 1.0) {
+                cout << "Assign task " << task_id
+                    << " to VM " << vm_id
+                    << " on machine " << machine_id
+                    << " (CPU=" << cpu_util << ", MEM=" << mem_util << ")\n";
+
+                VM_AddTask(vm_id, task_id, HIGH_PRIORITY);
+                task_to_vm[task_id] = vm_id;
+                return;
             }
-        }
-        if (this_m_info.active_vms == 0) {
-            // no more active VM's, just shut off since no active tasks will be attached to the VM any longer
-            Machine_SetState(this_m_info.machine_id, S5);
         }
     }
 
-    // int iteration = 0;
-    // // actually try to migrate tasks over if possible
-    // for (SimpleMachineInfo mach: sorted_active_machines) {
-    //     MachineInfo_t this_mach_info = Machine_GetInfo(mach.id);
-    //     if (mach.utilization > 0 && this_mach_info.active_vms != 0) {
-    //         for (VMId_t vm_id: vms) {
-    //             VMInfo_t this_vm_info = VM_GetInfo(vm_id);
-    //             if (this_vm_info.machine_id == mach.id) {
-    //                 // for each vm attached to this machine
-    //                 for (TaskId_t t_id: this_vm_info.active_tasks) {
-    //                     TaskInfo_t temp_task_info = GetTaskInfo(t_id);
-    //                     // for each workload on this attached vm
-    //                     double load_factor = GetTaskLoadFactor(this_mach_info, temp_task_info, temp_task_info.required_memory);
-    //                     for (unsigned i = iteration; i < sorted_active_machines.size(); i++) {
-    //                         // for each machine with greater util than this current one
-    //                         MachineInfo_t temp_mach_info = Machine_GetInfo(sorted_active_machines[i].id);
-    //                         if (temp_task_info.required_cpu == temp_mach_info.cpu && (temp_task_info.gpu_capable? (temp_mach_info.gpus? 1 : 0) : 1)) {
-    //                             // only try to check util and migrate if the machine even matches the specs of this task
-    //                             double temp_util = GetMachineUtil(temp_mach_info, temp_task_info, vms);
-    //                             if (load_factor + temp_util < 1) {
-    //                                 // migrate this task to another VM on another machine
-    //                                 // make sure that this VM and machine also matches the specs of this task first though
-    //                                 for (VMId_t temp_vm: vms) {
-    //                                     VMInfo_t temp_vm_info = VM_GetInfo(temp_vm);
-    //                                     if (temp_vm_info.machine_id == sorted_active_machines[i].id && temp_task_info.required_vm == temp_vm_info.vm_type) {
-    //                                         // migrating = true;
-    //                                         // VM_RemoveTask(vm_id, t_id);
-    //                                         // VM_AddTask(temp_vm_info.vm_id, t_id, HIGH_PRIORITY);
-    //                                         // migrating = false;
-    //                                         break;
-    //                                     }
-    //                                 }
-    //                             }
-    //                         }
-    //                     }
-    //                 }
-    //                 // if (this_vm_info.active_tasks.size() == 0) {
-    //                 //     VM_Shutdown(vm_id);
-    //                 //     break;
-    //                 // }
-    //             }
-    //         }
-    //     }
-
-    //     // // at the end, if there are no more vm's on this machine then turn it off
-    //     // if ((Machine_GetInfo(mach.id)).active_vms == 0){
-    //     //     // no more vms on this machine so turn it off and continue
-    //     //     Machine_SetState(mach.id, S5);
-    //     // }
-    //     iteration++;
-    // }
+    // Step 3: If no existing VM can take it, add a new machine & VM
+    AddActiveMachine(task_id, this_task_info, machines, vms, task_to_vm, active_machines);
 }
+
 
 // Public interface below
 
@@ -355,11 +363,12 @@ void SimulationComplete(Time_t time) {
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
     // call a function that will handle SLA warnings internally by the scheduler
-    SLA_violation = true;
-    Scheduler.NewTask(time, task_id);
+    // SLA_violation = true;
+    // Scheduler.NewTask(time, task_id);
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
     // Called in response to an earlier request to change the state of a machine
 }
+
 
