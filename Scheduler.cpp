@@ -12,31 +12,30 @@
 
 static bool migrating = false;
 
-struct MachineStatePair {
-    MachineId_t id;
-    MachineState_t s_state;
-};
 
-struct MachineMemoryPair {
-    MachineId_t id;
-    unsigned memory_available;
-};
 
 struct VMExecTimePair {
     VMId_t vm_id;
     Time_t pending_execution_time;
 };
 
-vector<MachineStatePair> ARMTotal;
-vector<MachineStatePair> POWERTotal;
-vector<MachineStatePair> RISCVTotal;
-vector<MachineStatePair> X86Total;
+// this will be the pool of VMs we can choose from
+// starting with basic implementation of 1 VM per machine for now
+// these will all be sorted in ascending pending execution time order
+vector<VMExecTimePair> LinuxVms;
+vector<VMExecTimePair> LinuxRTVms;
+vector<VMExecTimePair> WinVms;
+vector<VMExecTimePair> AixVms;
 
-vector<MachineMemoryPair> sorted_machines_by_mem;
-vector<VMId_t> migrating_VMs;
-vector<MachineId_t> state_changing_machines;
 
 /* helper functions */
+
+/*  The point of this function is to calculate the pending execution time of a given VM.
+    It goes through to get all the remaining total instructions left (from all its active tasks)
+    then gets the MIPS based on the current p state of the machine this vm is attached to.
+    Additionally, we need to get the total number of cpus that the physical machine has.
+    From there, we can calculate the remaining expected time of execution from this point.
+*/
 static Time_t FindRemainingExecTime(VMId_t this_vm){
     VMInfo_t vm_info = VM_GetInfo(this_vm);
     uint64_t total_remaining_instr = 0;
@@ -46,8 +45,23 @@ static Time_t FindRemainingExecTime(VMId_t this_vm){
     MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
-    Time_t remaining_exec_time = (total_remaining_instr / instructions_per_sec) * 1000000; // conversion from seconds to microseconds
+    Time_t remaining_exec_time = (total_remaining_instr / (instructions_per_sec * m_info.num_cpus)) * 1000000; // conversion from seconds to microseconds
     return remaining_exec_time; // in microseconds
+}
+
+/* The purpose of this function is to calculate the adjusted pending execution time
+    by taking the current pending time of the given vm, then depending on the mips and
+    number of cpus attached to this vm, these metrics can determine however long
+    it will take for this task to finish given the current state of the vm.
+    The function will return the adjusted amount from the given current pending time.
+*/
+static Time_t FindAdjustedExecTime(TaskId_t task_id, VMId_t vm_id, Time_t curr_pending_time) {
+    VMInfo_t vm_info = VM_GetInfo(vm_id);
+    MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
+    TaskInfo_t t_info = GetTaskInfo(task_id);
+    unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
+    Time_t additional_exec_time = (t_info.remaining_instructions / (instructions_per_sec * m_info.num_cpus)) * 1000000;
+    return curr_pending_time + additional_exec_time;
 }
 
 void Scheduler::Init() {
@@ -55,42 +69,15 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
-    unsigned int total_machines = Machine_GetTotal();
-    for (unsigned i = 0; i < total_machines; i++) {
-        MachineId_t m_id = MachineId_t(i);
-        MachineInfo_t m_info = Machine_GetInfo(m_id);
-        switch (m_info.cpu) {
-            case ARM:
-                ARMTotal.push_back({m_id, m_info.s_state});
-                break;
-            case POWER:
-                POWERTotal.push_back({m_id, m_info.s_state});
-                break;
-            case RISCV:
-                RISCVTotal.push_back({m_id, m_info.s_state});
-                break;
-            case X86:
-                X86Total.push_back({m_id, m_info.s_state});
-                break;
-            default:
-                break;
-        }
-        // all machines should have low memory usage
-        unsigned int mem_available = m_info.memory_size - m_info.memory_used;
-        sorted_machines_by_mem.push_back({m_id, mem_available});
-    }
-
-    // sort memory available by most amount to least amount
-    sort(sorted_machines_by_mem.begin(), sorted_machines_by_mem.end(),
-        [](const MachineMemoryPair& a, MachineMemoryPair& b){
-            return a.memory_available > b.memory_available;
-        });
-
     // initialize 1 VM to start for now
+    // TODO: initialize all possible machines with VMs to start
+    // so we don't need to try and figure out the VM_create logic
+    // bc that is too hard for me rn
     VMId_t X86_vm = VM_Create(LINUX, X86);
     vms.push_back(X86_vm);
-    machines.push_back(X86Total[0].id);
-    VM_Attach(X86_vm, X86Total[0].id);
+    machines.push_back(MachineId_t(0));
+    VM_Attach(X86_vm, MachineId_t(0));
+    LinuxVms.push_back({X86_vm, FindRemainingExecTime(X86_vm)});
 
 }
 
@@ -101,40 +88,86 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, create a new VM, attach it to the VM, then add the task
     // Turn on a machine, migrate an existing VM from a loaded machine....
-
+    TaskInfo_t t_info = GetTaskInfo(task_id);
     vector<VMExecTimePair> vm_sorted_exec_time;
 
-    // sort all active (not migrating) VMs that are on active (not state changing) machines by their pending execution times
-    for (VMId_t vm_id: vms) {
-        VMInfo_t vm_info = VM_GetInfo(vm_id);
-        auto it1 = find(migrating_VMs.begin(), migrating_VMs.end(), vm_id);
-        auto it2 = find(state_changing_machines.begin(), state_changing_machines.end(), vm_info.machine_id);
-        if (it1 == migrating_VMs.end() && it2 == state_changing_machines.end()) {
-            // this vm is currently not migrating and the machine it is on is not changing state either, so we 
-            // should consider it for our list of available vm's from list of active vms, figure out the 
-            // remaining execution time from all of the vm's active tasks
-            Time_t pending_execution_time = FindRemainingExecTime(vm_id);
-            vm_sorted_exec_time.push_back({vm_id, pending_execution_time});
-        }
+    // only looking through the pool of vms that match this task's required vm type
+    // may as well update all the pending execution times now too
+    switch(t_info.required_vm) {
+        case LINUX:
+            for (VMExecTimePair vm_pair: LinuxVms) {
+                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+                vm_sorted_exec_time.push_back({vm_pair.vm_id, pending_execution_time});
+            }
+            break;
+        case LINUX_RT:
+            for (VMExecTimePair vm_pair: LinuxRTVms) {
+                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+                vm_sorted_exec_time.push_back({vm_pair.vm_id, pending_execution_time});
+            }
+            break;
+        case WIN:
+            for (VMExecTimePair vm_pair: WinVms) {
+                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+                vm_sorted_exec_time.push_back({vm_pair.vm_id, pending_execution_time});
+            }
+            break;
+        case AIX:
+            for (VMExecTimePair vm_pair: AixVms) {
+                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+                vm_sorted_exec_time.push_back({vm_pair.vm_id, pending_execution_time});
+            }
+            break;
+        default:
+            break;
     }
 
-    // now sort the list by ascending execution times
+    // sort all active (not migrating) VMs that are on active machines by their 
+    // pending execution times in ascending order
     sort(vm_sorted_exec_time.begin(), vm_sorted_exec_time.end(),
         [](const VMExecTimePair& a, VMExecTimePair& b){
             return a.pending_execution_time < b.pending_execution_time;
         });
 
-    // now, based on this list, pick the next compatible vm with the lowest pending execution time
-    VMId_t selected_v = vm_sorted_exec_time[0].vm_id;
-    
-
-    Priority_t priority = (task_id == 0 || task_id == 64)? HIGH_PRIORITY : MID_PRIORITY;
-    if(migrating) {
-        VM_AddTask(vms[0], task_id, priority);
+    vector<VMExecTimePair> adjusted_vm_exec_times;
+    // now, go through every vm on this list and add
+    for (VMExecTimePair vm_pair: vm_sorted_exec_time) {
+        // get the adjusted vm exec time, based on this vm's mips and num cpus
+        Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
+        // put that in auxiliary structure as a candidate to consider
+        adjusted_vm_exec_times.push_back({vm_pair.vm_id, adjusted_time});
     }
-    else {
-        VM_AddTask(vms[0], task_id, priority);
-    }// Skeleton code, you need to change it according to your algorithm
+    
+    // sort this list of adjusted times now with the added in weight of the VM capabilities with task's demands
+    sort(adjusted_vm_exec_times.begin(), adjusted_vm_exec_times.end(),
+        [](const VMExecTimePair& a, VMExecTimePair& b){
+            return a.pending_execution_time < b.pending_execution_time;
+        });
+
+    // now just choose the first vm that matches cpu description
+    for (unsigned i = 0; i < adjusted_vm_exec_times.size(); i++) {
+        VMId_t possible_vm = adjusted_vm_exec_times[i].vm_id;
+        MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
+        if (m_info.cpu == t_info.required_cpu) {
+            // found a good match
+            // TODO: calculate a better priority, probably based on
+            // the target_completion time in comparison to the now time
+            // or something like that
+            VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
+            // if (t_info.required_vm == LINUX) {
+                
+            // }
+            // else if (t_info.required_vm == LINUX_RT) {
+
+            // }
+            // else if (t_info.required_vm == WIN) {
+
+            // }
+            // else { // needs to be AIX atp
+
+            // }
+        }
+    }
 }
 
 void Scheduler::PeriodicCheck(Time_t now) {
@@ -142,6 +175,52 @@ void Scheduler::PeriodicCheck(Time_t now) {
     // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
     // Unlike the other invocations of the scheduler, this one doesn't report any specific event
     // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
+
+    // we will use this to periodically update our pending execution time of each of our VMs
+    vector<VMExecTimePair> temp_linux;
+    vector<VMExecTimePair> temp_linuxrt;
+    vector<VMExecTimePair> temp_win;
+    vector<VMExecTimePair> temp_aix;
+
+    // for linux vms
+    for (VMExecTimePair vm_pair: LinuxVms) {
+        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+        temp_linux.push_back({vm_pair.vm_id, pending_execution_time});
+    }
+    sort(temp_linux.begin(), temp_linux.end(),
+    [](const VMExecTimePair& a, VMExecTimePair& b){
+        return a.pending_execution_time < b.pending_execution_time;
+    });
+
+    // for linux rt vms
+    for (VMExecTimePair vm_pair: LinuxRTVms) {
+        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+        temp_linuxrt.push_back({vm_pair.vm_id, pending_execution_time});
+    }
+    sort(temp_linuxrt.begin(), temp_linuxrt.end(),
+    [](const VMExecTimePair& a, VMExecTimePair& b){
+        return a.pending_execution_time < b.pending_execution_time;
+    });
+
+    // for windows vms
+    for (VMExecTimePair vm_pair: WinVms) {
+        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+        temp_win.push_back({vm_pair.vm_id, pending_execution_time});
+    }
+    sort(temp_win.begin(), temp_win.end(),
+    [](const VMExecTimePair& a, VMExecTimePair& b){
+        return a.pending_execution_time < b.pending_execution_time;
+    });
+
+    // for aix vms
+    for (VMExecTimePair vm_pair: AixVms) {
+        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+        temp_aix.push_back({vm_pair.vm_id, pending_execution_time});
+    }
+    sort(temp_aix.begin(), temp_aix.end(),
+    [](const VMExecTimePair& a, VMExecTimePair& b){
+        return a.pending_execution_time < b.pending_execution_time;
+    });
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -161,6 +240,9 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
+
+    // TODO: add in optimizations that the paper talks about
+    // with load balancing
 }
 
 // Public interface below
