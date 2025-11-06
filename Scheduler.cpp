@@ -46,6 +46,7 @@ static Time_t FindRemainingExecTime(VMId_t this_vm){
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
     Time_t remaining_exec_time = (total_remaining_instr / (instructions_per_sec * m_info.num_cpus)) * 1000000; // conversion from seconds to microseconds
+    cout << "vm " << this_vm << " pending exec time is " << remaining_exec_time << endl;
     return remaining_exec_time; // in microseconds
 }
 
@@ -61,6 +62,7 @@ static Time_t FindAdjustedExecTime(TaskId_t task_id, VMId_t vm_id, Time_t curr_p
     TaskInfo_t t_info = GetTaskInfo(task_id);
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     Time_t additional_exec_time = (t_info.remaining_instructions / (instructions_per_sec * m_info.num_cpus)) * 1000000;
+    cout << "task " << task_id << " additional exec time in microseconds is " << additional_exec_time << endl;
     return curr_pending_time + additional_exec_time;
 }
 
@@ -69,15 +71,49 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
-    // initialize 1 VM to start for now
-    // TODO: initialize all possible machines with VMs to start
-    // so we don't need to try and figure out the VM_create logic
-    // bc that is too hard for me rn
-    VMId_t X86_vm = VM_Create(LINUX, X86);
-    vms.push_back(X86_vm);
-    machines.push_back(MachineId_t(0));
-    VM_Attach(X86_vm, MachineId_t(0));
-    LinuxVms.push_back({X86_vm, FindRemainingExecTime(X86_vm)});
+    // first, get the machine cluster information, specifically the different CPU types
+    // unsigned numARM = 0;
+    // unsigned numRISCV = 0;
+    // unsigned numPOWER = 0;
+    // unsigned numX86 = 0;
+
+    // unsigned total_machines = Machine_GetTotal();
+
+    for (int i = 0; i < 16; i++) {
+        machines.push_back(MachineId_t(i));
+        VMId_t vm_created = VM_Create(LINUX, X86);
+        vms.push_back(vm_created);
+        VM_Attach(vm_created, MachineId_t(i));
+        LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+    }
+
+    // for (unsigned i = 0; i < total_machines; i++) {
+    //     VMId_t vm_created;
+    //     switch(Machine_GetCPUType(MachineId_t(i))) {
+    //         case ARM:
+    //             numARM++;
+    //             machines.push_back(MachineId_t(i));
+    //             break;
+    //         case POWER:
+    //             numPOWER++;
+    //             machines.push_back(MachineId_t(i));
+    //             break;
+    //         case RISCV:
+    //             numRISCV++;
+    //             machines.push_back(MachineId_t(i));
+    //             break;
+    //         case X86:
+    //             numX86++;
+    //             machines.push_back(MachineId_t(i));
+    //             vm_created = VM_Create(LINUX, X86);
+    //             vms.push_back(vm_created);
+    //             VM_Attach(vm_created, MachineId_t(i));
+    //             LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+    //             break;
+    //         default:
+    //             break;
+    //     }
+    // }
 
 }
 
@@ -131,9 +167,11 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
 
     vector<VMExecTimePair> adjusted_vm_exec_times;
     // now, go through every vm on this list and add
+    cout << "Now we are calculating and adjusting every available VM's adjusted execution time with this task" << endl;
     for (VMExecTimePair vm_pair: vm_sorted_exec_time) {
         // get the adjusted vm exec time, based on this vm's mips and num cpus
         Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
+        cout << "The new adjusted execution time for vm " << vm_pair.vm_id << " is " << adjusted_time << endl;
         // put that in auxiliary structure as a candidate to consider
         adjusted_vm_exec_times.push_back({vm_pair.vm_id, adjusted_time});
     }
@@ -144,6 +182,7 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             return a.pending_execution_time < b.pending_execution_time;
         });
 
+
     // now just choose the first vm that matches cpu description
     for (unsigned i = 0; i < adjusted_vm_exec_times.size(); i++) {
         VMId_t possible_vm = adjusted_vm_exec_times[i].vm_id;
@@ -153,7 +192,11 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             // TODO: calculate a better priority, probably based on
             // the target_completion time in comparison to the now time
             // or something like that
+            // update the vectors maybe or maybe that is not entirely necessary
+            // cout << "found a valid VM on valid machine. adding task to VM " << possible_vm 
+            //      << " with execution time of " << adjusted_vm_exec_times[i].pending_execution_time << endl;
             VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
+            return;
             // if (t_info.required_vm == LINUX) {
                 
             // }
@@ -177,50 +220,50 @@ void Scheduler::PeriodicCheck(Time_t now) {
     // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
 
     // we will use this to periodically update our pending execution time of each of our VMs
-    vector<VMExecTimePair> temp_linux;
-    vector<VMExecTimePair> temp_linuxrt;
-    vector<VMExecTimePair> temp_win;
-    vector<VMExecTimePair> temp_aix;
+    // vector<VMExecTimePair> temp_linux;
+    // vector<VMExecTimePair> temp_linuxrt;
+    // vector<VMExecTimePair> temp_win;
+    // vector<VMExecTimePair> temp_aix;
 
-    // for linux vms
-    for (VMExecTimePair vm_pair: LinuxVms) {
-        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-        temp_linux.push_back({vm_pair.vm_id, pending_execution_time});
-    }
-    sort(temp_linux.begin(), temp_linux.end(),
-    [](const VMExecTimePair& a, VMExecTimePair& b){
-        return a.pending_execution_time < b.pending_execution_time;
-    });
+    // // for linux vms
+    // for (VMExecTimePair vm_pair: LinuxVms) {
+    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+    //     temp_linux.push_back({vm_pair.vm_id, pending_execution_time});
+    // }
+    // sort(temp_linux.begin(), temp_linux.end(),
+    // [](const VMExecTimePair& a, VMExecTimePair& b){
+    //     return a.pending_execution_time < b.pending_execution_time;
+    // });
 
-    // for linux rt vms
-    for (VMExecTimePair vm_pair: LinuxRTVms) {
-        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-        temp_linuxrt.push_back({vm_pair.vm_id, pending_execution_time});
-    }
-    sort(temp_linuxrt.begin(), temp_linuxrt.end(),
-    [](const VMExecTimePair& a, VMExecTimePair& b){
-        return a.pending_execution_time < b.pending_execution_time;
-    });
+    // // for linux rt vms
+    // for (VMExecTimePair vm_pair: LinuxRTVms) {
+    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+    //     temp_linuxrt.push_back({vm_pair.vm_id, pending_execution_time});
+    // }
+    // sort(temp_linuxrt.begin(), temp_linuxrt.end(),
+    // [](const VMExecTimePair& a, VMExecTimePair& b){
+    //     return a.pending_execution_time < b.pending_execution_time;
+    // });
 
-    // for windows vms
-    for (VMExecTimePair vm_pair: WinVms) {
-        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-        temp_win.push_back({vm_pair.vm_id, pending_execution_time});
-    }
-    sort(temp_win.begin(), temp_win.end(),
-    [](const VMExecTimePair& a, VMExecTimePair& b){
-        return a.pending_execution_time < b.pending_execution_time;
-    });
+    // // for windows vms
+    // for (VMExecTimePair vm_pair: WinVms) {
+    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+    //     temp_win.push_back({vm_pair.vm_id, pending_execution_time});
+    // }
+    // sort(temp_win.begin(), temp_win.end(),
+    // [](const VMExecTimePair& a, VMExecTimePair& b){
+    //     return a.pending_execution_time < b.pending_execution_time;
+    // });
 
-    // for aix vms
-    for (VMExecTimePair vm_pair: AixVms) {
-        Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-        temp_aix.push_back({vm_pair.vm_id, pending_execution_time});
-    }
-    sort(temp_aix.begin(), temp_aix.end(),
-    [](const VMExecTimePair& a, VMExecTimePair& b){
-        return a.pending_execution_time < b.pending_execution_time;
-    });
+    // // for aix vms
+    // for (VMExecTimePair vm_pair: AixVms) {
+    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
+    //     temp_aix.push_back({vm_pair.vm_id, pending_execution_time});
+    // }
+    // sort(temp_aix.begin(), temp_aix.end(),
+    // [](const VMExecTimePair& a, VMExecTimePair& b){
+    //     return a.pending_execution_time < b.pending_execution_time;
+    // });
 }
 
 void Scheduler::Shutdown(Time_t time) {
