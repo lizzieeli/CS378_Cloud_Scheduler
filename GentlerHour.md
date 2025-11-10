@@ -50,6 +50,19 @@ machine class:
         GPUs: no
 }
 
+machine class:
+{
+        Number of machines: 4
+        CPU type: POWER
+        Number of cores: 32
+        Memory: 131072
+        S-States: [120, 60, 30, 15, 8, 4, 0]
+        P-States: [8, 4, 2, 1]
+        C-States: [8, 2, 1, 0]
+        MIPS: [1500, 1200, 1000, 800]
+        GPUs: no
+}
+
 task class:
 {
         Start time: 60000
@@ -114,8 +127,8 @@ task class:
 {
         Start time: 17000000
         End time :  250000000
-        Inter arrival: 1000
-        Expected runtime: 8000000
+        Inter arrival: 10000
+        Expected runtime: 1000000
         Memory: 8
         VM type: LINUX
         GPU enabled: yes
@@ -125,4 +138,18 @@ task class:
         Seed: 520120
 }
 
+task class:
+{
+        Start time: 60000
+        End time : 120000
+        Inter arrival: 1000
+        Expected runtime: 1800000000
+        Memory: 8192
+        VM type: AIX
+        GPU enabled: no
+        SLA type: SLA3
+        CPU type: POWER
+        Task type: HPC
+        Seed: 520231
+}
 

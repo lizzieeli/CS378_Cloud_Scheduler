@@ -21,6 +21,10 @@ public:
     void PeriodicCheck(Time_t now);
     void Shutdown(Time_t now);
     void TaskComplete(Time_t now, TaskId_t task_id);
+    void AllocateNewLinuxVM(TaskId_t task_id, TaskInfo_t t_info);
+    void AllocateNewWinVM(TaskId_t task_id, TaskInfo_t t_info);
+    void AllocateNewLinuxRTVM(TaskId_t task_id, TaskInfo_t t_info);
+    void AllocateNewAIXVM(TaskId_t task_id, TaskInfo_t t_info);
 private:
     vector<VMId_t> vms;
     vector<MachineId_t> machines;

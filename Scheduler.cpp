@@ -69,6 +69,224 @@ static Time_t FindAdjustedExecTime(TaskId_t task_id, VMId_t vm_id, Time_t curr_p
     return curr_pending_time + additional_exec_time;
 }
 
+/* The purpose of these next four functions [AllocateNew__VM(TaskId_t, TaskInfo_t)] is to
+   be able to dynamically reallocate resources being taken up by any idle VMs to a newly
+   created required VM for a task when all other VMs of this required type is overcommitted.
+*/
+void Scheduler::AllocateNewLinuxVM(TaskId_t task_id, TaskInfo_t t_info) {
+    // reached here, need to convert a compatible unused machine to a VM of this type instead
+
+    for (unsigned i = 0; i < WinVms.size(); i++) {
+        VMExecTimePair vm_pair = WinVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            WinVms.erase(remove_if(WinVms.begin(), WinVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), WinVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
+
+    for (unsigned i = 0; i < LinuxRTVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxRTVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxRTVms.erase(remove_if(LinuxRTVms.begin(), LinuxRTVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), LinuxRTVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
+
+    for (unsigned i = 0; i < AixVms.size(); i++) {
+        VMExecTimePair vm_pair = AixVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            AixVms.erase(remove_if(AixVms.begin(), AixVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), AixVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
+}
+
+void Scheduler::AllocateNewWinVM(TaskId_t task_id, TaskInfo_t t_info) {
+
+    for (unsigned i = 0; i < LinuxRTVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxRTVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxRTVms.erase(remove_if(LinuxRTVms.begin(), LinuxRTVms.end(),
+                        [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                        }), LinuxRTVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            WinVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }   
+
+    for (unsigned i = 0; i < LinuxVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxVms.erase(remove_if(LinuxVms.begin(), LinuxVms.end(),
+                        [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                        }), LinuxVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            WinVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }   
+
+
+}
+
+void Scheduler::AllocateNewLinuxRTVM(TaskId_t task_id, TaskInfo_t t_info) {
+    for (unsigned i = 0; i < WinVms.size(); i++) {
+        VMExecTimePair vm_pair = WinVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            WinVms.erase(remove_if(WinVms.begin(), WinVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), WinVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX_RT, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxRTVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
+
+    for (unsigned i = 0; i < AixVms.size(); i++) {
+        VMExecTimePair vm_pair = AixVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            AixVms.erase(remove_if(AixVms.begin(), AixVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), AixVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX_RT, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxRTVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
+
+    for (unsigned i = 0; i < LinuxVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxVms.erase(remove_if(LinuxVms.begin(), LinuxVms.end(),
+                        [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                        }), LinuxVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX_RT, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxRTVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }  
+}
+
+void Scheduler::AllocateNewAIXVM(TaskId_t task_id, TaskInfo_t t_info) {
+    for (unsigned i = 0; i < LinuxRTVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxRTVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxRTVms.erase(remove_if(LinuxRTVms.begin(), LinuxRTVms.end(),
+                        [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                        }), LinuxRTVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(AIX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            AixVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }   
+
+    for (unsigned i = 0; i < LinuxVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxVms.erase(remove_if(LinuxVms.begin(), LinuxVms.end(),
+                        [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                        }), LinuxVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(AIX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            AixVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }   
+
+}
+
 void Scheduler::Init() {
     // Find the parameters of the clusters
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
@@ -279,47 +497,23 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         }
     }
 
-    // reached here, need to convert a compatible unused machine to a VM of this type instead
-
-    for (unsigned i = 0; i < WinVms.size(); i++) {
-        cout << "winvms size is " << WinVms.size() << endl;
-        VMExecTimePair vm_pair = WinVms[i];
-        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-        MachineId_t m_id = vm_info.machine_id;
-        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-            WinVms.erase(remove_if(WinVms.begin(), WinVms.end(),
-                      [vm_pair](const VMExecTimePair& s) {
-                        return s.vm_id == vm_pair.vm_id;
-                      }), WinVms.end());
-            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-            VM_Shutdown(vm_info.vm_id);
-            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-            VM_Attach(new_vm, m_id);
-            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
-            vms.push_back(new_vm);
-            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-            return;
-        }
-    }
-
-    for (unsigned i = 0; i < LinuxRTVms.size(); i++) {
-        VMExecTimePair vm_pair = LinuxRTVms[i];
-        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-        MachineId_t m_id = vm_info.machine_id;
-        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-            LinuxRTVms.erase(remove_if(LinuxRTVms.begin(), LinuxRTVms.end(),
-                      [vm_pair](const VMExecTimePair& s) {
-                        return s.vm_id == vm_pair.vm_id;
-                      }), LinuxRTVms.end());
-            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-            VM_Shutdown(vm_info.vm_id);
-            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-            VM_Attach(new_vm, m_id);
-            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
-            vms.push_back(new_vm);
-            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-            return;
-        }
+    // reaching here means all other VMs of this task's required VM type are overcommitted.
+    // need to convert a compatible unused machine to a VM of this type instead.
+    switch(t_info.required_vm) {
+        case LINUX:
+            AllocateNewLinuxVM(task_id, t_info);
+            break;
+        case LINUX_RT:
+            AllocateNewLinuxRTVM(task_id, t_info);
+            break;
+        case WIN:
+            AllocateNewWinVM(task_id, t_info);
+            break;
+        case AIX:
+            AllocateNewAIXVM(task_id, t_info);
+            break;
+        default:
+            break;
     }
 }
 
