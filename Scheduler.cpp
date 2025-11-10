@@ -552,7 +552,6 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
                     if (vm_pair.pending_execution_time - UnderloadedVMs[i].pending_execution_time <= 1000000) {
                         return;
                     }
-                    cout << "Migrating task " << task_to_migrate << " from overloaded vm " << vm_pair.vm_id << " to underloaded vm " << UnderloadedVMs[i].vm_id << endl;
                     VM_RemoveTask(vm_pair.vm_id, task_to_migrate);
                     VM_AddTask(UnderloadedVMs[i].vm_id, task_to_migrate, HIGH_PRIORITY);
                     underloaded_index++;
