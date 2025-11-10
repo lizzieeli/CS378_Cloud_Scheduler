@@ -294,15 +294,6 @@ void Scheduler::Init() {
 
     // first, get the machine cluster information, specifically the different CPU types
 
-
-    // for (unsigned i = 0; i < 40; i++) {
-    //     machines.push_back(MachineId_t(i));
-    //     VMId_t vm_created = VM_Create(LINUX, X86);
-    //     VM_Attach(vm_created, MachineId_t(i));
-    //     LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
-    // }
-
-
     unsigned numARM = 0;
     unsigned numRISCV = 0;
     unsigned numPOWER = 0;
@@ -470,11 +461,9 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
 
     vector<VMExecTimePair> adjusted_vm_exec_times;
     // now, go through every vm on this list and add
-    // cout << "Now we are calculating and adjusting every available VM's adjusted execution time with task " << task_id << endl;
     for (VMExecTimePair vm_pair: vm_sorted_exec_time) {
         // get the adjusted vm exec time, based on this vm's mips and num cpus
         Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
-        // cout << "The new adjusted execution time for vm " << vm_pair.vm_id << " is " << adjusted_time << endl;
         // put that in auxiliary structure as a candidate to consider
         adjusted_vm_exec_times.push_back({vm_pair.vm_id, adjusted_time});
     }
@@ -491,7 +480,6 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         VMId_t possible_vm = adjusted_vm_exec_times[i].vm_id;
         MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
         if (m_info.cpu == t_info.required_cpu && (m_info.memory_used + t_info.required_memory < m_info.memory_size)) {
-            // cout << "adding task " << task_id << " to vm " << possible_vm << endl;
             VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
             return;
         }
@@ -522,52 +510,6 @@ void Scheduler::PeriodicCheck(Time_t now) {
     // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
     // Unlike the other invocations of the scheduler, this one doesn't report any specific event
     // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
-
-    // we will use this to periodically update our pending execution time of each of our VMs
-    // vector<VMExecTimePair> temp_linux;
-    // vector<VMExecTimePair> temp_linuxrt;
-    // vector<VMExecTimePair> temp_win;
-    // vector<VMExecTimePair> temp_aix;
-
-    // // for linux vms
-    // for (VMExecTimePair vm_pair: LinuxVms) {
-    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-    //     temp_linux.push_back({vm_pair.vm_id, pending_execution_time});
-    // }
-    // sort(temp_linux.begin(), temp_linux.end(),
-    // [](const VMExecTimePair& a, VMExecTimePair& b){
-    //     return a.pending_execution_time < b.pending_execution_time;
-    // });
-
-    // // for linux rt vms
-    // for (VMExecTimePair vm_pair: LinuxRTVms) {
-    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-    //     temp_linuxrt.push_back({vm_pair.vm_id, pending_execution_time});
-    // }
-    // sort(temp_linuxrt.begin(), temp_linuxrt.end(),
-    // [](const VMExecTimePair& a, VMExecTimePair& b){
-    //     return a.pending_execution_time < b.pending_execution_time;
-    // });
-
-    // // for windows vms
-    // for (VMExecTimePair vm_pair: WinVms) {
-    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-    //     temp_win.push_back({vm_pair.vm_id, pending_execution_time});
-    // }
-    // sort(temp_win.begin(), temp_win.end(),
-    // [](const VMExecTimePair& a, VMExecTimePair& b){
-    //     return a.pending_execution_time < b.pending_execution_time;
-    // });
-
-    // // for aix vms
-    // for (VMExecTimePair vm_pair: AixVms) {
-    //     Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-    //     temp_aix.push_back({vm_pair.vm_id, pending_execution_time});
-    // }
-    // sort(temp_aix.begin(), temp_aix.end(),
-    // [](const VMExecTimePair& a, VMExecTimePair& b){
-    //     return a.pending_execution_time < b.pending_execution_time;
-    // });
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -587,8 +529,6 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
     // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
-
-    // TODO: add in optimizations that the paper talks about with load balancing
 
     // relying on the most recent call of periodiccheck to update these to be accurate enough
     // at worst, what is currently there will be an overestimation
