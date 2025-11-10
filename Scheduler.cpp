@@ -27,6 +27,11 @@ vector<VMExecTimePair> LinuxRTVms;
 vector<VMExecTimePair> WinVms;
 vector<VMExecTimePair> AixVms;
 
+vector<MachineId_t> ArmMachines;
+vector<MachineId_t> PowerMachines;
+vector<MachineId_t> RiscvMachines;
+vector<MachineId_t> X86Machines;
+
 
 /* helper functions */
 
@@ -46,7 +51,6 @@ static Time_t FindRemainingExecTime(VMId_t this_vm){
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
     Time_t remaining_exec_time = (total_remaining_instr / (instructions_per_sec * m_info.num_cpus)) * 1000000; // conversion from seconds to microseconds
-    cout << "vm " << this_vm << " pending exec time is " << remaining_exec_time << endl;
     return remaining_exec_time; // in microseconds
 }
 
@@ -62,7 +66,6 @@ static Time_t FindAdjustedExecTime(TaskId_t task_id, VMId_t vm_id, Time_t curr_p
     TaskInfo_t t_info = GetTaskInfo(task_id);
     unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
     Time_t additional_exec_time = (t_info.remaining_instructions / (instructions_per_sec * m_info.num_cpus)) * 1000000;
-    cout << "task " << task_id << " additional exec time in microseconds is " << additional_exec_time << endl;
     return curr_pending_time + additional_exec_time;
 }
 
@@ -72,49 +75,130 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
     // first, get the machine cluster information, specifically the different CPU types
-    // unsigned numARM = 0;
-    // unsigned numRISCV = 0;
-    // unsigned numPOWER = 0;
-    // unsigned numX86 = 0;
 
-    // unsigned total_machines = Machine_GetTotal();
 
-    for (int i = 0; i < 16; i++) {
-        machines.push_back(MachineId_t(i));
-        VMId_t vm_created = VM_Create(LINUX, X86);
-        vms.push_back(vm_created);
-        VM_Attach(vm_created, MachineId_t(i));
-        LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
-    }
-
-    // for (unsigned i = 0; i < total_machines; i++) {
-    //     VMId_t vm_created;
-    //     switch(Machine_GetCPUType(MachineId_t(i))) {
-    //         case ARM:
-    //             numARM++;
-    //             machines.push_back(MachineId_t(i));
-    //             break;
-    //         case POWER:
-    //             numPOWER++;
-    //             machines.push_back(MachineId_t(i));
-    //             break;
-    //         case RISCV:
-    //             numRISCV++;
-    //             machines.push_back(MachineId_t(i));
-    //             break;
-    //         case X86:
-    //             numX86++;
-    //             machines.push_back(MachineId_t(i));
-    //             vm_created = VM_Create(LINUX, X86);
-    //             vms.push_back(vm_created);
-    //             VM_Attach(vm_created, MachineId_t(i));
-    //             LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
-    //             break;
-    //         default:
-    //             break;
-    //     }
+    // for (unsigned i = 0; i < 40; i++) {
+    //     machines.push_back(MachineId_t(i));
+    //     VMId_t vm_created = VM_Create(LINUX, X86);
+    //     VM_Attach(vm_created, MachineId_t(i));
+    //     LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
     // }
 
+
+    unsigned numARM = 0;
+    unsigned numRISCV = 0;
+    unsigned numPOWER = 0;
+    unsigned numX86 = 0;
+
+    unsigned total_machines = Machine_GetTotal();
+
+    for (unsigned i = 0; i < total_machines; i++) {
+        switch(Machine_GetCPUType(MachineId_t(i))) {
+            case ARM:
+                numARM++;
+                machines.push_back(MachineId_t(i));
+                ArmMachines.push_back(MachineId_t(i));
+                break;
+            case POWER:
+                numPOWER++;
+                machines.push_back(MachineId_t(i));
+                PowerMachines.push_back(MachineId_t(i));
+                break;
+            case RISCV:
+                numRISCV++;
+                machines.push_back(MachineId_t(i));
+                RiscvMachines.push_back(MachineId_t(i));
+                break;
+            case X86:
+                numX86++;
+                machines.push_back(MachineId_t(i));
+                X86Machines.push_back(MachineId_t(i));
+                break;
+            default:
+                break;
+        }
+    }
+
+    // statically initialize VMs per machine
+
+    for (unsigned i = 0; i < numARM; i++) {
+        VMId_t vm_created;
+        if (i >= 0 && i < numARM/2) {
+            vm_created = VM_Create(WIN, ARM);
+            VM_Attach(vm_created, ArmMachines[i]);
+            WinVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else if (i == numARM/2 || i == (numARM/2 + 1)) {
+            vm_created = VM_Create(LINUX_RT, ARM);
+            VM_Attach(vm_created, ArmMachines[i]);
+            LinuxRTVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else {
+            vm_created = VM_Create(LINUX, ARM);
+            VM_Attach(vm_created, ArmMachines[i]);
+            LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+         }
+         vms.push_back(vm_created);
+    }
+
+    for (unsigned i = 0; i < numRISCV; i++) {
+        VMId_t vm_created;
+        if (i < numRISCV/2) {
+            // initialize LINUX machine
+            vm_created = VM_Create(LINUX, RISCV);
+            VM_Attach(vm_created, RiscvMachines[i]);
+            LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else {
+            // initialize other machines 
+            vm_created = VM_Create(LINUX_RT, RISCV);
+            VM_Attach(vm_created, RiscvMachines[i]);
+            LinuxRTVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        vms.push_back(vm_created);
+    }
+
+    for (unsigned i = 0; i < numPOWER; i++) {
+        VMId_t vm_created;
+        if (i < numPOWER/2) {
+            // initialize AIX machines
+            vm_created = VM_Create(AIX, POWER);
+            VM_Attach(vm_created, PowerMachines[i]);
+            AixVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else if (i == numPOWER/2) {
+            vm_created = VM_Create(LINUX_RT, POWER);
+            VM_Attach(vm_created, PowerMachines[i]);
+            LinuxRTVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else {
+            vm_created = VM_Create(LINUX, POWER);
+            VM_Attach(vm_created, PowerMachines[i]);
+            LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        vms.push_back(vm_created);
+    }
+
+    for (unsigned i = 0; i < numX86; i++) {
+        VMId_t vm_created;
+        if (i >= 0 && i < numX86/2) {
+            // initialize LINUX machine
+            vm_created = VM_Create(LINUX, X86);
+            VM_Attach(vm_created, X86Machines[i]);
+            LinuxVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else if (i == numX86/2 || i == (numX86/2 + 1)) {
+            vm_created = VM_Create(LINUX_RT, X86);
+            VM_Attach(vm_created, X86Machines[i]);
+            LinuxRTVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        else {
+            vm_created = VM_Create(WIN, X86);
+            VM_Attach(vm_created, X86Machines[i]);
+            WinVms.push_back({vm_created, FindRemainingExecTime(vm_created)});
+        }
+        vms.push_back(vm_created);
+    }
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
@@ -124,6 +208,7 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     // Turn on a machine, create a new VM, attach it to the VM, then add the task
     // Turn on a machine, migrate an existing VM from a loaded machine....
+    // cout << "Received new task " << task_id << endl;
     TaskInfo_t t_info = GetTaskInfo(task_id);
     vector<VMExecTimePair> vm_sorted_exec_time;
 
@@ -167,11 +252,11 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
 
     vector<VMExecTimePair> adjusted_vm_exec_times;
     // now, go through every vm on this list and add
-    cout << "Now we are calculating and adjusting every available VM's adjusted execution time with this task" << endl;
+    // cout << "Now we are calculating and adjusting every available VM's adjusted execution time with task " << task_id << endl;
     for (VMExecTimePair vm_pair: vm_sorted_exec_time) {
         // get the adjusted vm exec time, based on this vm's mips and num cpus
         Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
-        cout << "The new adjusted execution time for vm " << vm_pair.vm_id << " is " << adjusted_time << endl;
+        // cout << "The new adjusted execution time for vm " << vm_pair.vm_id << " is " << adjusted_time << endl;
         // put that in auxiliary structure as a candidate to consider
         adjusted_vm_exec_times.push_back({vm_pair.vm_id, adjusted_time});
     }
@@ -187,28 +272,53 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     for (unsigned i = 0; i < adjusted_vm_exec_times.size(); i++) {
         VMId_t possible_vm = adjusted_vm_exec_times[i].vm_id;
         MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
-        if (m_info.cpu == t_info.required_cpu) {
-            // found a good match
-            // TODO: calculate a better priority, probably based on
-            // the target_completion time in comparison to the now time
-            // or something like that
-            // update the vectors maybe or maybe that is not entirely necessary
-            // cout << "found a valid VM on valid machine. adding task to VM " << possible_vm 
-            //      << " with execution time of " << adjusted_vm_exec_times[i].pending_execution_time << endl;
+        if (m_info.cpu == t_info.required_cpu && (m_info.memory_used + t_info.required_memory < m_info.memory_size)) {
+            // cout << "adding task " << task_id << " to vm " << possible_vm << endl;
             VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
             return;
-            // if (t_info.required_vm == LINUX) {
-                
-            // }
-            // else if (t_info.required_vm == LINUX_RT) {
+        }
+    }
 
-            // }
-            // else if (t_info.required_vm == WIN) {
+    // reached here, need to convert a compatible unused machine to a VM of this type instead
 
-            // }
-            // else { // needs to be AIX atp
+    for (unsigned i = 0; i < WinVms.size(); i++) {
+        cout << "winvms size is " << WinVms.size() << endl;
+        VMExecTimePair vm_pair = WinVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            WinVms.erase(remove_if(WinVms.begin(), WinVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), WinVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
+        }
+    }
 
-            // }
+    for (unsigned i = 0; i < LinuxRTVms.size(); i++) {
+        VMExecTimePair vm_pair = LinuxRTVms[i];
+        VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
+        MachineId_t m_id = vm_info.machine_id;
+        if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+            LinuxRTVms.erase(remove_if(LinuxRTVms.begin(), LinuxRTVms.end(),
+                      [vm_pair](const VMExecTimePair& s) {
+                        return s.vm_id == vm_pair.vm_id;
+                      }), LinuxRTVms.end());
+            vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
+            VM_Shutdown(vm_info.vm_id);
+            VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
+            VM_Attach(new_vm, m_id);
+            LinuxVms.push_back({new_vm, FindRemainingExecTime(new_vm)});
+            vms.push_back(new_vm);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            return;
         }
     }
 }
@@ -284,8 +394,39 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
 
-    // TODO: add in optimizations that the paper talks about
-    // with load balancing
+    // TODO: add in optimizations that the paper talks about with load balancing
+
+    // relying on the most recent call of periodiccheck to update these to be accurate enough
+    // at worst, what is currently there will be an overestimation
+    vector<VMExecTimePair> OverloadedVMs;
+    vector<VMExecTimePair> UnderloadedVMs;
+    for (unsigned i = 0; i < LinuxVms.size()/2; i++) {
+        UnderloadedVMs.push_back(LinuxVms[i]);
+    }
+    for (unsigned i = LinuxVms.size()/2; i < LinuxVms.size(); i++) {
+        OverloadedVMs.push_back(LinuxVms[i]);
+    }
+
+    unsigned underloaded_index = 0;
+    for (VMExecTimePair vm_pair: OverloadedVMs) {
+        if (VM_GetInfo(vm_pair.vm_id).active_tasks.size() > 0) {
+            TaskId_t task_to_migrate = VM_GetInfo(vm_pair.vm_id).active_tasks[0];
+            for (unsigned i = underloaded_index; i < UnderloadedVMs.size(); i++) {
+                if (Machine_GetInfo(VM_GetInfo(UnderloadedVMs[i].vm_id).machine_id).cpu == GetTaskInfo(task_id).required_cpu) {
+                    // check for a threshold number, if the load between the two chosen is quite balanced already then just return
+                    // else, continue on with load balancing
+                    if (vm_pair.pending_execution_time - UnderloadedVMs[i].pending_execution_time <= 1000000) {
+                        return;
+                    }
+                    cout << "Migrating task " << task_to_migrate << " from overloaded vm " << vm_pair.vm_id << " to underloaded vm " << UnderloadedVMs[i].vm_id << endl;
+                    VM_RemoveTask(vm_pair.vm_id, task_to_migrate);
+                    VM_AddTask(UnderloadedVMs[i].vm_id, task_to_migrate, HIGH_PRIORITY);
+                    underloaded_index++;
+                }
+            } 
+        }      
+    }
+
 }
 
 // Public interface below

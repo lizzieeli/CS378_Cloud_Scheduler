@@ -38,4 +38,19 @@ task class:
         Seed: 520230
 }
 
+task class:
+{
+        Start time: 60000
+        End time : 3600000
+        Inter arrival: 1800
+        Expected runtime: 1000
+        Memory: 8
+        VM type: WIN
+        GPU enabled: no
+        SLA type: SLA2
+        CPU type: ARM
+        Task type: WEB
+        Seed: 520239
+}
+
 
