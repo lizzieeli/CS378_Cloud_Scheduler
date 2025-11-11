@@ -277,6 +277,7 @@ void Scheduler::PeriodicCheck(Time_t now) {
         
         ExecuteTasks(machine, vms);
         MachineInfo_t machine_info = Machine_GetInfo(machine);
+        bool assigned_task = false;
         for (auto it = general_pending_tasks.begin(); it != general_pending_tasks.end(); ) {
             auto task_id = *it;
             TaskInfo_t task_info = GetTaskInfo(task_id);
@@ -285,7 +286,9 @@ void Scheduler::PeriodicCheck(Time_t now) {
                 // RemoveTaskFromList(task_id, general_pending_tasks);
                 it = general_pending_tasks.erase(it);
                 cout << "Attaching task " << task_id << " to machine " << machine << endl;
-                VM_AddTask(GetVMForMachine(vms, machine, task_info), task_id, HIGH_PRIORITY);
+                //VM_AddTask(GetVMForMachine(vms, machine, task_info), task_id, HIGH_PRIORITY);
+                pending_tasks_for_machine[machine].push_back(task_id);
+                assigned_task = true;
             } else {
                 it++;
             }
@@ -299,7 +302,7 @@ void Scheduler::PeriodicCheck(Time_t now) {
             }
         }
 
-        if (machine_info.active_tasks == 0) {
+        if (machine_info.active_tasks == 0 && !assigned_task) {
             machines_standby.push_back(machine);
             machines_transitioning.push_back(machine);
             RemoveMachineFromList(machine, machines_running);
@@ -315,17 +318,113 @@ void Scheduler::PeriodicCheck(Time_t now) {
         }
     }
 
+    // for (auto machine : machines_standby) {
+    //     MachineInfo_t machine_info = Machine_GetInfo(machine);
+    //     if (pending_tasks_for_machine[machine].size() == 0) {
+    //         machines_sleeping.push_back(machine);
+    //         machines_transitioning.push_back(machine);
+    //         RemoveMachineFromList(machine, machines_standby);
+    //         Machine_SetState(machine, S5);
+    //     } else {
+    //         if (!IsMachineInList(machine, machines_running) && !IsMachineInList(machine, machines_transitioning)) {
+    //             machines_running.push_back(machine);
+    //             machines_transitioning.push_back(machine);
+    //             Machine_SetState(machine, S0);
+    //         }
+    //     }
+    // }
+
+    // vector<MachineId_t> to_sleep;
+    // vector<MachineId_t> to_run;
+
+    // for (auto machine : machines_standby) {
+    //     MachineInfo_t machine_info = Machine_GetInfo(machine);
+    //     if (IsMachineInList(machine, machines_transitioning)) {
+    //         continue;
+    //     }
+
+    //     if (pending_tasks_for_machine[machine].empty()) {
+    //         to_sleep.push_back(machine);
+    //     } else {
+    //         if (!IsMachineInList(machine, machines_running)) {
+    //             to_run.push_back(machine);
+    //         }
+    //     }
+    // }
+
+    // // apply state changes AFTER iterating
+
+    // for (auto machine : to_sleep) {
+    //     machines_sleeping.push_back(machine);
+    //     machines_transitioning.push_back(machine);
+    //     RemoveMachineFromList(machine, machines_standby);
+    //     Machine_SetState(machine, S5);
+    // }
+
+    // for (auto machine : to_run) {
+    //     machines_running.push_back(machine);
+    //     machines_transitioning.push_back(machine);
+    //     RemoveMachineFromList(machine, machines_standby);
+    //     Machine_SetState(machine, S0);
+    // }
+
+    vector<MachineId_t> to_sleep;
+    vector<MachineId_t> to_run;
+
+    // Try to assign work to standby machines BEFORE changing their states
     for (auto machine : machines_standby) {
-        MachineInfo_t machine_info = Machine_GetInfo(machine);
-        if (pending_tasks_for_machine[machine].size() == 0) {
-            machines_sleeping.push_back(machine);
-            machines_transitioning.push_back(machine);
-            RemoveMachineFromList(machine, machines_standby);
-            
-            
-            Machine_SetState(machine, S5);
+        if (IsMachineInList(machine, machines_transitioning))
+            continue;
+
+        bool assigned_to_this_machine = false;
+
+        // Try to assign a global pending task to this standby machine
+        for (auto it = general_pending_tasks.begin();
+            it != general_pending_tasks.end() && !assigned_to_this_machine; ) {
+
+            TaskId_t task_id = *it;
+            TaskInfo_t task_info = GetTaskInfo(task_id);
+
+            if (IsMachineCapable(task_info, machine, vms)) {
+                it = general_pending_tasks.erase(it);   // remove from global queue
+                pending_tasks_for_machine[machine].push_back(task_id);
+
+                assigned_to_this_machine = true;
+            } else {
+                ++it;
+            }
+        }
+
+        // If after checking the global queue we still have nothing for this machine
+        if (pending_tasks_for_machine[machine].empty() && !assigned_to_this_machine) {
+            to_sleep.push_back(machine);
+        } else {
+            // Transition to running only if not already running/transitioning
+            if (!IsMachineInList(machine, machines_running)) {
+                to_run.push_back(machine);
+            }
         }
     }
+
+    // ---- Apply state changes AFTER LOOP ----
+
+    for (auto machine : to_sleep) {
+        cout << "[Scheduler] Standby machine " << machine << " -> sleep S5" << endl;
+        machines_sleeping.push_back(machine);
+        machines_transitioning.push_back(machine);
+        RemoveMachineFromList(machine, machines_standby);
+        Machine_SetState(machine, S5);
+    }
+
+    for (auto machine : to_run) {
+        cout << "[Scheduler] Standby machine " << machine << " -> running S0" << endl;
+        machines_running.push_back(machine);
+        machines_transitioning.push_back(machine);
+        RemoveMachineFromList(machine, machines_standby);
+        Machine_SetState(machine, S0);
+    }
+
+
 }
 
 
