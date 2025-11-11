@@ -111,7 +111,7 @@ static void RemoveTaskFromList(TaskId_t task_id, vector<TaskId_t> &vector) {
     }
 }
 
-static void RemoveVMFromList(VMId_t vm_id, vector<TaskId_t> &vector) {
+static void RemoveVMFromList(VMId_t vm_id, vector<VMId_t> &vector) {
     auto it = find(vector.begin(), vector.end(), vm_id);
     if (it != vector.end()) {
         vector.erase(it);
