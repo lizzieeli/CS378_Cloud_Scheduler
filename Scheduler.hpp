@@ -21,6 +21,7 @@ public:
     void PeriodicCheck(Time_t now);
     void Shutdown(Time_t now);
     void TaskComplete(Time_t now, TaskId_t task_id);
+    friend void StateChangeComplete(Time_t time, MachineId_t machine_id);
 private:
     vector<VMId_t> vms;
     vector<MachineId_t> machines;
