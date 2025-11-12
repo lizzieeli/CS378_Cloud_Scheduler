@@ -13,6 +13,7 @@ static bool migrating = false;
 static bool SLA_violation = false;
 static unsigned active_machines = 1;
 unordered_map<TaskId_t, VMId_t> task_to_vm;
+vector<TaskId_t> todo_list;
 
 struct SimpleMachineInfo {
     MachineId_t id;
@@ -100,55 +101,6 @@ static vector<SimpleMachineInfo> SortMachinesByCPU(
     return sorted;
 }
 
-
-
-// static bool HandleSLAWarning(TaskId_t task_id, vector<MachineId_t>& machines, vector<VMId_t>& vms, VMId_t allocated_vm) {
-//     // sort all machines in ascending order of utilization
-//     TaskInfo_t this_task_info = GetTaskInfo(task_id);
-//     //vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByUtilization(machines, this_task_info, vms);
-//     vector<SimpleMachineInfo> sorted_active_machines = SortMachinesByCPU(machines, vms);
-
-//     bool allocation_success = false;
-
-//     for (unsigned i = 0; i < sorted_active_machines.size(); i++) {
-//         MachineId_t temp_m_id = sorted_active_machines[i].id;
-//         if (VM_GetInfo(allocated_vm).machine_id != temp_m_id) {
-//             MachineInfo_t m_info = Machine_GetInfo(temp_m_id);
-//             double m_util = GetMachineUtil(m_info, this_task_info, vms);
-//             double t_load = GetTaskLoadFactor(m_info, this_task_info, this_task_info.required_memory); 
-//             if (m_util + t_load < 1) { // we found a machine that can accept this task
-//                 migrating = true;
-//                 VM_Migrate(allocated_vm, temp_m_id);
-//                 allocation_success = true;
-//                 MigrationDone(Now(), allocated_vm);
-//                 break;
-//             }
-//         }
-//     }
-    
-    // // adds new machine & vm to active queue
-    // unsigned total = Machine_GetTotal();
-    // for (unsigned i = 0; i < total; i++) {
-    //     MachineInfo_t m = Machine_GetInfo(i);
-    //     machines.push_back(i);
-    //     active_machines++;
-    //     VMId_t new_vm_id = VM_Create(this_task_info.required_vm,
-    //                                 this_task_info.required_cpu);
-    //     vms.push_back(new_vm_id);
-    //     VM_Attach(new_vm_id, i);
-    //     VM_AddTask(new_vm_id, task_id, HIGH_PRIORITY);
-
-    //     task_to_vm[task_id] = new_vm_id;
-
-    //     cout << "Powered ON machine " << i << " and placed task " << task_id
-    //         << " on VM " << new_vm_id << endl;
-
-    //     return true;
-    // }
-    // return false; // no machines available to power on
-
-// }
-
 /* Internal/Private Scheduler Functions to implement */
 void Scheduler::Init() {
     /* This is essentially where the initialization of all the diff data structures and stuff will happen */
@@ -164,7 +116,6 @@ void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
-    // greedy does a "lazy" way of allocating, where we create one VM and attach to one machine until further notic
     active_machines = 1;
     vms.push_back(VM_Create(LINUX, X86));
     machines.push_back(MachineId_t(0));
@@ -175,16 +126,66 @@ void Scheduler::Init() {
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
-    // Update your data structure. The VM now can receive new tasks
-    //vms.push_back(vm_id);
+}
+
+static bool FindMachineForTask(vector<MachineId_t> machines, vector<VMId_t> vms, TaskId_t task_id) {
+    vector<SimpleMachineInfo> sorted_machines = SortMachinesByCPU(machines, vms);
+
+    TaskInfo_t this_task_info = GetTaskInfo(task_id);
+    CPUType_t req_CPU = RequiredCPUType(task_id);
+    VMType_t req_VM = RequiredVMType(task_id);
+    unsigned req_mem = GetTaskMemory(task_id);
+
+
+    // Step 2: Greedy assignment — machine first, then VM
+    for (auto& entry : sorted_machines) {
+        MachineId_t machine_id = entry.id;
+        MachineInfo_t mach_info = Machine_GetInfo(machine_id);
+    
+        if (mach_info.cpu != req_CPU)
+            continue;
+        for (VMId_t vm_id : vms) {
+            VMInfo_t vm_info = VM_GetInfo(vm_id);
+
+            if (vm_info.machine_id != machine_id)
+                continue;
+
+            if (vm_info.vm_type != req_VM)
+                continue;
+
+            double cpu_util = GetCPUUtil(mach_info, vms);
+            double mem_util = GetMemUtil(mach_info, this_task_info);
+
+            cout << "Machine : " << machine_id << " in list with cpu " << cpu_util << endl;
+
+            if (cpu_util < 1.0 && mem_util < 1.0) {
+                cout << "Assign task " << task_id
+                    << " to VM " << vm_id
+                    << " on machine " << machine_id
+                    << " (CPU=" << cpu_util << ", MEM=" << mem_util << ")\n";
+
+                VM_AddTask(vm_id, task_id, HIGH_PRIORITY);
+                task_to_vm[task_id] = vm_id;
+                return true;
+            }
+        }
+    }
+
+    return false;
 }
 
 
 void Scheduler::PeriodicCheck(Time_t now) {
-    // This method should be called from SchedulerCheck()
-    // SchedulerCheck is called periodically by the simulator to allow you to monitor, make decisions, adjustments, etc.
-    // Unlike the other invocations of the scheduler, this one doesn't report any specific event
-    // Recommendation: Take advantage of this function to do some monitoring and adjustments as necessary
+    // Checks if there's a task on the todo list that could be done
+    for (auto it = todo_list.begin(); it != todo_list.end(); ) {
+        TaskId_t task = *it;
+
+        if (FindMachineForTask(machines, vms, task)) {
+            it = todo_list.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 void Scheduler::Shutdown(Time_t time) {
@@ -244,66 +245,23 @@ static void AddActiveMachine(TaskId_t task_id, TaskInfo_t task_info,
         return;
     }
 
-    // cout << "No more machines available to activate for task " << task_id << endl;
-    SLA_violation = true;
+    // no machines are currently suitable to run this task; push to pending list
+    todo_list.push_back(task_id);
 }
 
 // Greedy machine-first NewTask implementation
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
-    // if (SLA_violation) {
-    //     std::cout << "SLA Violation detected for task " << task_id << std::endl;
-    //     VMId_t VMThatHasViolation = task_to_vm[task_id];
-    //     HandleSLAWarning(task_id, machines, vms, VMThatHasViolation);
-    //     SLA_violation = false;
-    //     return;
-    // }
-
     TaskInfo_t this_task_info = GetTaskInfo(task_id);
     CPUType_t req_CPU = RequiredCPUType(task_id);
     VMType_t req_VM = RequiredVMType(task_id);
     unsigned req_mem = GetTaskMemory(task_id);
 
-    // Step 1: sort active machines by utilization
-    //auto sorted_machines = SortMachinesByUtilization(machines, this_task_info, vms);
-    vector<SimpleMachineInfo> sorted_machines = SortMachinesByCPU(machines, vms);
-
-
-    // Step 2: Greedy assignment — machine first, then VM
-    for (auto& entry : sorted_machines) {
-        MachineId_t machine_id = entry.id;
-        MachineInfo_t mach_info = Machine_GetInfo(machine_id);
-    
-        if (mach_info.cpu != req_CPU)
-            continue;
-        for (VMId_t vm_id : vms) {
-            VMInfo_t vm_info = VM_GetInfo(vm_id);
-
-            if (vm_info.machine_id != machine_id)
-                continue;
-
-            if (vm_info.vm_type != req_VM)
-                continue;
-
-            double cpu_util = GetCPUUtil(mach_info, vms);
-            double mem_util = GetMemUtil(mach_info, this_task_info);
-
-            if (cpu_util < 1.0 && mem_util < 1.0) {
-                cout << "Assign task " << task_id
-                    << " to VM " << vm_id
-                    << " on machine " << machine_id
-                    << " (CPU=" << cpu_util << ", MEM=" << mem_util << ")\n";
-
-                VM_AddTask(vm_id, task_id, HIGH_PRIORITY);
-                task_to_vm[task_id] = vm_id;
-                return;
-            }
-        }
+    // Tries to find machine that can accept the task
+    if (!FindMachineForTask(machines, vms, task_id)) {
+        // No machines found; try to create a new machine and attach a new vm
+        AddActiveMachine(task_id, this_task_info, machines, vms, task_to_vm, active_machines);
     }
-
-    // Step 3: If no existing VM can take it, add a new machine & VM
-    AddActiveMachine(task_id, this_task_info, machines, vms, task_to_vm, active_machines);
 }
-
 
 // Public interface below
 
@@ -340,12 +298,6 @@ void SchedulerCheck(Time_t time) {
     // This function is called periodically by the simulator, no specific event
     SimOutput("SchedulerCheck(): SchedulerCheck() called at " + to_string(time), 4);
     Scheduler.PeriodicCheck(time);
-    // static unsigned counts = 0;
-    // counts++;
-    // if(counts == 10) {
-    //     migrating = true;
-    //     VM_Migrate(1, 9);
-    // }
 }
 
 void SimulationComplete(Time_t time) {
