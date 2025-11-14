@@ -125,13 +125,81 @@ static task_template TemplateExtraction(TaskId_t t_id, Time_t now) {
     return new_template;
 }
 
+/* Helper function to get the first available vm of the required type we can find on this
+   given machine. If there are none, make and attach a new one and return it.
+*/
+static VMId_t find_suitable_VM_on_M(MachineId_t m_id, VMType_t req_vm) {
+    for (VMId_t this_vm : m_to_vm_mappings[m_id]) {
+        if (VM_GetInfo(this_vm).vm_type == req_vm) {
+            return this_vm;
+        }
+    }
+    // if we reach here, need to make new vm of required type, attach to given machine
+    VMId_t vm_created = VM_Create(req_vm, Machine_GetInfo(m_id).cpu);
+    VM_Attach(vm_created, m_id);
+    // update necesssary data structures
+    vm_to_m_mappings[vm_created] = m_id;
+    m_to_vm_mappings[m_id].push_back(vm_created);
+    return vm_created;
+}
+
 /* These functions will help in optimizing for energy and also performance
    when an io task completes by checking to see if any further load balancing can be done
 */
-static void load_balance_IO_Machines(TaskId_t task_id, task_template t_template) {
+static void load_balance_IO_Machines() {
+    // sort all Memory Machines based on ascending pending execution time
+    vector<MResourcePair> sorted_io_machines;
+    for (MachineId_t m_id : MemoryMachines) {
+        Time_t pending_execution_time = FindRemainingExecTime(m_id);
+        unsigned avail_mem = FindRemainingAvailMem(m_id);
+        sorted_io_machines.push_back({m_id, pending_execution_time, avail_mem});
+    }
+    // sort by ascending pending execution time
+    sort(sorted_io_machines.begin(), sorted_io_machines.end(),
+        [](const MResourcePair& a, MResourcePair& b){
+            return a.pending_execution_time < b.pending_execution_time;
+        });
+
+    vector<MResourcePair> OverloadedMs;
+    vector<MResourcePair> UnderloadedMs;
+    for (unsigned i = 0; i < sorted_io_machines.size()/2; i++) {
+        UnderloadedMs.push_back(sorted_io_machines[i]);
+    }
+    for (unsigned i = sorted_io_machines.size()/2; i < sorted_io_machines.size(); i++) {
+        OverloadedMs.push_back(sorted_io_machines[i]);
+    }
+
+    unsigned underloaded_index = 0;
+    for (MResourcePair m_pair: OverloadedMs) {
+        if (Machine_GetInfo(m_pair.m_id).active_tasks > 0) {
+            for (VMId_t this_vm : m_to_vm_mappings[m_pair.m_id]) {
+                unsigned this_vm_num_active = VM_GetInfo(this_vm).active_tasks.size();
+                if (this_vm_num_active > 0) {
+                    TaskId_t task_to_migrate = VM_GetInfo(this_vm).active_tasks[0];
+                    TaskInfo_t t_info = GetTaskInfo(task_to_migrate);
+                    for (unsigned i = underloaded_index; i < UnderloadedMs.size(); i++) {
+                        if (Machine_GetInfo(UnderloadedMs[underloaded_index].m_id).cpu == Machine_GetInfo(OverloadedMs[i].m_id).cpu) {
+                            Time_t difference = OverloadedMs[i].pending_execution_time - UnderloadedMs[underloaded_index].pending_execution_time;
+                            if (difference <= 1000000) {
+                                // at this point all the machines left to look through are almost equal to each other in load
+                                return;
+                            }
+                            // remove task from chosen overloaded machine
+                            VM_RemoveTask(this_vm, task_to_migrate);
+                            // add task to chosen underloaded machine
+                            VMId_t vm_to_migrate_to = find_suitable_VM_on_M(UnderloadedMs[underloaded_index].m_id, t_info.required_vm);
+                            VM_AddTask(vm_to_migrate_to, task_to_migrate, HIGH_PRIORITY);
+                            // update data structures and other logic necessary
+                            vm_mappings[task_to_migrate] = vm_to_migrate_to;
+                            underloaded_index++;
+                        }
+                    }
+                }
+            } 
+        }      
+    }
 
 }
-
 
 /* This is a helper function to move all the vms on m2 to m1 and power down m2
 */
@@ -281,16 +349,22 @@ void Scheduler::Init() {
         }
     }
 
-    // start with initializing at least one linux vm per machine
-    // TODO: change to start with only one compute machine with one linux vm.
-    // all other compute machines need to be powered down to start
-    for (unsigned i = 0; i < ComputeMachines.size(); i++) {
-        MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[i]);
-        VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
-        VM_Attach(new_linux_vm, ComputeMachines[i]);
-        // update all necessary data structures
-        m_to_vm_mappings[ComputeMachines[i]].push_back(new_linux_vm);
-        vm_to_m_mappings[new_linux_vm] = ComputeMachines[i];
+    // start with initializing at least one linux vm per IO machine
+    // and initialize one linux machine on only one compute machine, sleeping the rest
+    MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[0]);
+    VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
+    VM_Attach(new_linux_vm, ComputeMachines[0]);
+    // update all necessary data structures
+    m_to_vm_mappings[ComputeMachines[0]].push_back(new_linux_vm);
+    vm_to_m_mappings[new_linux_vm] = ComputeMachines[0];
+
+    // put to sleep all other compute machines
+    for (unsigned i = 1; i < ComputeMachines.size(); i++) {
+        Machine_SetState(ComputeMachines[i], S5);
+        m_changing_state.push_back(ComputeMachines[i]);
+    }
+    for (unsigned i = 1; i < ComputeMachines.size(); i++) {
+        ComputeMachines.erase(ComputeMachines.begin() + i);
     }
     for (unsigned i = 0; i < MemoryMachines.size(); i++) {
         MachineInfo_t m_info = Machine_GetInfo(MemoryMachines[i]);
@@ -342,10 +416,10 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                 }
             }
         }
-        // sort based on ascending pending execution time
+        // sort by descending available memory order
         sort(m_sorted_resource.begin(), m_sorted_resource.end(),
             [](const MResourcePair& a, MResourcePair& b){
-                return a.pending_execution_time > b.pending_execution_time;
+                return a.avail_mem > b.avail_mem;
             });
     }
     else {
@@ -358,10 +432,10 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
                 }
             }
         }
-        // sort by descending available memory order
+        // sort based on ascending pending execution time
         sort(m_sorted_resource.begin(), m_sorted_resource.end(),
             [](const MResourcePair& a, MResourcePair& b){
-                return a.avail_mem > b.avail_mem;
+                return a.pending_execution_time > b.pending_execution_time;
             });
    }
 
@@ -386,6 +460,15 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
         // if we reached here, there are no available machines that fit this task type at all
         // need to dynamically re-classify unused machines
         if (new_template.compute_task) {    // if it is a compute task, we need to look at unused io machines
+            // wake up another compute machine
+            if (powered_down_machines.size() > 0) {
+                MachineId_t m_id = powered_down_machines[0];
+                powered_down_machines.erase(powered_down_machines.begin());
+                m_changing_state.push_back(m_id);
+                ComputeMachines.erase(remove(ComputeMachines.begin(), ComputeMachines.end(), m_id), ComputeMachines.end());
+                Machine_SetState(m_id, S0);
+                compute_m_wakeup++;
+            }
             for (MachineId_t m_id: MemoryMachines) {
                 MachineInfo_t m_info = Machine_GetInfo(m_id);
                 if (m_info.cpu == t_info.required_cpu && m_info.active_tasks == 0) {
@@ -435,7 +518,6 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             MachineId_t m_id = powered_down_machines[0];
             powered_down_machines.erase(powered_down_machines.begin());
             m_changing_state.push_back(m_id);
-            // TODO: is this line necessary? if we power down then we just remove from compute machines tbh?? actually whatever
             ComputeMachines.erase(remove(ComputeMachines.begin(), ComputeMachines.end(), m_id), ComputeMachines.end());
             Machine_SetState(m_id, S0);
             compute_m_to_io_m++;
@@ -487,37 +569,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     task_temp_mappings.erase(task_id);
     vm_mappings.erase(task_id);
     consolidate_vms();
-    // need to update the utilization and memory usage based on this complete task
-
-    // trying to migrate tasks over to other compatible task type machines to free up memory for io vms
-    // vector<VMResourcePair> OverloadedVMs;
-    // vector<VMResourcePair> UnderloadedVMs;
-    // for (unsigned i = 0; i < Compute_Linux.size()/2; i++) {
-    //     UnderloadedVMs.push_back(Compute_Linux[i]);
-    // }
-    // for (unsigned i = Compute_Linux.size()/2; i < Compute_Linux.size(); i++) {
-    //     OverloadedVMs.push_back(Compute_Linux[i]);
-    // }
-
-    // unsigned underloaded_index = 0;
-    // for (VMResourcePair vm_pair: OverloadedVMs) {
-    //     if (VM_GetInfo(vm_pair.vm_id).active_tasks.size() > 0) {
-    //         TaskId_t task_to_migrate = VM_GetInfo(vm_pair.vm_id).active_tasks[0];
-    //         for (unsigned i = underloaded_index; i < UnderloadedVMs.size(); i++) {
-    //             if (Machine_GetInfo(VM_GetInfo(UnderloadedVMs[i].vm_id).machine_id).cpu == GetTaskInfo(task_id).required_cpu) {
-    //                 // check for a threshold number, if the load between the two chosen is quite balanced already then just return
-    //                 // else, continue on with load balancing
-    //                 if (vm_pair.pending_execution_time - UnderloadedVMs[i].pending_execution_time <= 1000000) {
-    //                     return;
-    //                 }
-    //                 VM_RemoveTask(vm_pair.vm_id, task_to_migrate);
-    //                 VM_AddTask(UnderloadedVMs[i].vm_id, task_to_migrate, HIGH_PRIORITY);
-    //                 underloaded_index++;
-    //             }
-    //         } 
-    //     }      
-    // }
-    // also trying dvfs for compute vms
+    load_balance_IO_Machines();
 }
 
 // Public interface below
