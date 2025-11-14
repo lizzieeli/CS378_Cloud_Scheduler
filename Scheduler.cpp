@@ -62,6 +62,7 @@ unsigned numX86;
 unsigned compute_m_to_io_m;
 unsigned compute_m_wakeup;
 
+
 /*  The point of this function is to calculate the pending execution time of a given VM.
     It goes through to get all the remaining total instructions left (from all its active tasks)
     then gets the MIPS based on the current p state of the machine this vm is attached to.
@@ -103,13 +104,13 @@ static task_template TemplateExtraction(TaskId_t t_id, Time_t now) {
     double target_execution_time = (t_info.target_completion - now) / 1000000; // microseconds
     double millions_of_instr = t_info.total_instructions / 1000000; // millions of instr
     task_template new_template;
-    if (t_info.required_memory > (0.6 * maxMemory)) {
+    if ((millions_of_instr / target_execution_time)  > (0.6 * maxMIPS)) {
         // this is a memory/io intensive task
-        new_template.compute_task = 0;
-    }
-    else if ((millions_of_instr / target_execution_time)  > (0.6 * maxMIPS)) {
-        // this is a compute intensive task
         new_template.compute_task = 1;
+    }
+    else if ((t_info.required_memory > (0.6 * maxMemory))) {
+        // this is a compute intensive task
+        new_template.compute_task = 0;
     }
     else {
         // this is a balanced task, compare the ratios and tiebreak to compute task
@@ -249,6 +250,15 @@ static void consolidate_vms() {
 
 }
 
+int Scheduler::GetTaskType(TaskId_t t_id) {
+    task_template t_temp = task_temp_mappings[t_id];
+    return t_temp.compute_task;
+}
+
+void Scheduler::HandleSLAWarning() {
+    consolidate_vms();
+}
+
 void Scheduler::HandleStateChangeComplete(MachineId_t m_id) {
     m_changing_state.erase(remove(m_changing_state.begin(), m_changing_state.end(), m_id), m_changing_state.end());
     if (Machine_GetInfo(m_id).s_state == S5) {
@@ -346,25 +356,35 @@ void Scheduler::Init() {
         else {
             // this is a pretty balanced machine that can go to either
             ComputeMachines.size() > MemoryMachines.size() ? MemoryMachines.push_back(MachineId_t(i)) : ComputeMachines.push_back(MachineId_t(i));
+            // ComputeMachines.push_back(MachineId_t(i));
         }
     }
 
     // start with initializing at least one linux vm per IO machine
     // and initialize one linux machine on only one compute machine, sleeping the rest
-    MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[0]);
-    VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
-    VM_Attach(new_linux_vm, ComputeMachines[0]);
-    // update all necessary data structures
-    m_to_vm_mappings[ComputeMachines[0]].push_back(new_linux_vm);
-    vm_to_m_mappings[new_linux_vm] = ComputeMachines[0];
+    // MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[0]);
+    // VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
+    // VM_Attach(new_linux_vm, ComputeMachines[0]);
+    // // update all necessary data structures
+    // m_to_vm_mappings[ComputeMachines[0]].push_back(new_linux_vm);
+    // vm_to_m_mappings[new_linux_vm] = ComputeMachines[0];
 
-    // put to sleep all other compute machines
-    for (unsigned i = 1; i < ComputeMachines.size(); i++) {
-        Machine_SetState(ComputeMachines[i], S5);
-        m_changing_state.push_back(ComputeMachines[i]);
-    }
-    for (unsigned i = 1; i < ComputeMachines.size(); i++) {
-        ComputeMachines.erase(ComputeMachines.begin() + i);
+    // // put to sleep all other compute machines
+    // for (unsigned i = 1; i < ComputeMachines.size(); i++) {
+    //     Machine_SetState(ComputeMachines[i], S5);
+    //     m_changing_state.push_back(ComputeMachines[i]);
+    // }
+    // for (unsigned i = 1; i < ComputeMachines.size(); i++) {
+    //     ComputeMachines.erase(ComputeMachines.begin() + i);
+    // }
+
+     for (unsigned i = 0; i < ComputeMachines.size(); i++) {
+        MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[i]);
+        VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
+        VM_Attach(new_linux_vm, ComputeMachines[i]);
+        // update all necessary data structures
+        m_to_vm_mappings[ComputeMachines[i]].push_back(new_linux_vm);
+        vm_to_m_mappings[new_linux_vm] = ComputeMachines[i];
     }
     for (unsigned i = 0; i < MemoryMachines.size(); i++) {
         MachineInfo_t m_info = Machine_GetInfo(MemoryMachines[i]);
@@ -399,6 +419,7 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     task_template new_template = TemplateExtraction(task_id, now);
+    // cout << "Attempting to allocate new task " << task_id << " of type " << new_template.compute_task << endl;
     task_temp_mappings[task_id] = new_template;
     TaskInfo_t t_info = GetTaskInfo(task_id);
 
@@ -617,12 +638,17 @@ void SimulationComplete(Time_t time) {
     cout << "Total Energy " << Machine_GetClusterEnergy() << "KW-Hour" << endl;
     cout << "Simulation run finished in " << double(time)/1000000 << " seconds" << endl;
     SimOutput("SimulationComplete(): Simulation finished at time " + to_string(time), 4);
+
+    cout << "Num of compute machines: " << ComputeMachines.size() << endl;
+    cout << "Num of io machines: " << MemoryMachines.size() << endl;
     
     Scheduler.Shutdown(time);
 }
 
 void SLAWarning(Time_t time, TaskId_t task_id) {
-    
+    int task_type = Scheduler.GetTaskType(task_id);
+    // cout << "SLA warning with task " << task_id << " of type " << task_type << endl;
+    // Scheduler.HandleSLAWarning();
 }
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
