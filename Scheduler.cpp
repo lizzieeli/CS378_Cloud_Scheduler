@@ -269,6 +269,16 @@ static void ExecuteTasks(MachineId_t machine, vector<VMId_t> &vms) {
     }
 }
 
+static bool MachineVMsAllIdle(MachineId_t machine, vector<VMId_t> &vms) {
+    for (auto vm : vms) {
+        VMInfo_t vm_info = VM_GetInfo(vm);
+        if (vm_info.active_tasks.size() != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 
 void Scheduler::PeriodicCheck(Time_t now) {
     // This method should be called from SchedulerCheck()
@@ -295,7 +305,7 @@ void Scheduler::PeriodicCheck(Time_t now) {
             }
         }
 
-        if (machine_info.active_tasks == 0 && pending_tasks_for_machine[machine].size() == 0) {
+        if (machine_info.active_tasks == 0 && pending_tasks_for_machine[machine].size() == 0 && MachineVMsAllIdle(machine, vms)) {
             ShutdownIdleVMsOnMachine(machine, vms);
             machines_standby.push_back(machine);
             machines_transitioning.push_back(machine);
@@ -345,12 +355,14 @@ void Scheduler::PeriodicCheck(Time_t now) {
 
     for (auto machine : to_sleep) {
         cout << "[Scheduler] Standby machine " << machine << " -> sleep S5" << endl;
-        ShutdownIdleVMsOnMachine(machine, vms);
-        machines_sleeping.push_back(machine);
-        machines_transitioning.push_back(machine);
-        RemoveMachineFromList(machine, machines_standby);
+        if (MachineVMsAllIdle(machine, vms)) {
+            ShutdownIdleVMsOnMachine(machine, vms);
+            machines_sleeping.push_back(machine);
+            machines_transitioning.push_back(machine);
+            RemoveMachineFromList(machine, machines_standby);
 
-        Machine_SetState(machine, S5);
+            Machine_SetState(machine, S5);
+        }
     }
 
     for (auto machine : to_run) {
@@ -448,6 +460,14 @@ void StateChangeComplete(Time_t time, MachineId_t machine_id) {
         if (pending_tasks_for_machine[machine_id].size() != 0) {
             cout << "transitioning machine " << machine_id << " to S0" << endl;
             Machine_SetState(machine_id, S0);
+        }
+
+        if (machine_info.active_vms != 0) {
+            cout << "Machine " << machine_id << " has " << machine_info.active_vms << " vms!!!!" << endl;
+        }
+    } else {
+        if (machine_info.active_vms != 0) {
+            cout << "Machine " << machine_id << " has " << machine_info.active_vms << " vms!!!!" << endl;
         }
     }
 
