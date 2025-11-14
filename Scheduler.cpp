@@ -21,39 +21,47 @@ struct task_template {
 };
 
 /* This is gonna be for compute intensive machines */
-struct VMResourcePair {
-    VMId_t vm_id;
+struct MResourcePair {
+    MachineId_t m_id;
     Time_t pending_execution_time;
     unsigned avail_mem;
 };
 
-/* continually sort these by pending execution time 
-   from smallest pending time to longest pending time */
-vector<VMResourcePair> Compute_Linux;
-vector<VMResourcePair> Compute_Linuxrt;
-vector<VMResourcePair> Compute_Win;
-vector<VMResourcePair> Compute_Aix;
+vector<MachineId_t> ArmMachines;
+vector<MachineId_t> PowerMachines;
+vector<MachineId_t> RiscvMachines;
+vector<MachineId_t> X86Machines;
 
-vector<task_template> Compute_Linux_Templates;
-vector<task_template> Compute_Linuxrt_Templates;
-vector<task_template> Compute_Win_Templates;
-vector<task_template> Compute_Aix_Templates;
+vector<MachineId_t> ComputeMachines;
+vector<MachineId_t> MemoryMachines;
 
-/* continually sort these by available memory left 
-   from most memory to least memory available */
-vector<VMResourcePair> IO_Linux;
-vector<VMResourcePair> IO_Linuxrt;
-vector<VMResourcePair> IO_Win;
-vector<VMResourcePair> IO_Aix;
+/* all data structures to continuously maintain */
+map<TaskId_t, task_template> task_temp_mappings;
+map<TaskId_t, VMId_t> vm_mappings;
 
-vector<task_template> IO_Linux_Templates;
-vector<task_template> IO_Linuxrt_Templates;
-vector<task_template> IO_Win_Templates;
-vector<task_template> IO_Aix_Templates;
+/* everytime we create a new vm or migrate a vm to another machine */
+map<VMId_t, MachineId_t> vm_to_m_mappings;
+map<MachineId_t, vector<VMId_t>> m_to_vm_mappings;
 
+
+/* for migration bookkeeping to maintain correctness */
+map<MachineId_t, bool> m_has_migration; // if consolidating, prob shouldn't check and consider this machine if it already has a migration to it
+map<VMId_t, bool> vm_migrating; // for consolidating, need to add checks to make sure a vm in this isnt migrating before adding task
+vector<MachineId_t> m_changing_state; // we know all machines in this can be for compute tasks
+vector<MachineId_t> powered_down_machines; // we know all machines in this can be for compute tasks
+
+/* for initialization and identifying diff types of machines */
 unsigned maxNumCPUS;
 unsigned maxMIPS;
 unsigned maxMemory;
+
+unsigned numARM;
+unsigned numRISCV;
+unsigned numPOWER;
+unsigned numX86;
+
+unsigned compute_m_to_io_m;
+unsigned compute_m_wakeup;
 
 /*  The point of this function is to calculate the pending execution time of a given VM.
     It goes through to get all the remaining total instructions left (from all its active tasks)
@@ -61,53 +69,29 @@ unsigned maxMemory;
     Additionally, we need to get the total number of cpus that the physical machine has.
     From there, we can calculate the remaining expected time of execution from this point.
 */
-static Time_t FindRemainingExecTime(VMId_t this_vm) {
-    VMInfo_t vm_info = VM_GetInfo(this_vm);
-    uint64_t total_remaining_instr = 0;
-    for (TaskId_t active_task: vm_info.active_tasks) {
-        total_remaining_instr += GetTaskInfo(active_task).remaining_instructions;
+static Time_t FindRemainingExecTime(MachineId_t this_m) {
+    Time_t remaining_exec_time = 0;
+    vector<VMId_t> this_vm_vector = m_to_vm_mappings[this_m];
+    for (VMId_t vm_attached: this_vm_vector) {
+        VMInfo_t vm_info = VM_GetInfo(vm_attached);
+        uint64_t total_remaining_instr = 0;
+        for (TaskId_t active_task: vm_info.active_tasks) {
+            total_remaining_instr += GetTaskInfo(active_task).remaining_instructions;
+        }
+        MachineInfo_t m_info = Machine_GetInfo(this_m);
+        unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
+        // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
+        remaining_exec_time = (total_remaining_instr / (instructions_per_sec * m_info.num_cpus)) * 1000000; // conversion from seconds to microseconds
     }
-    MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
-    unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
-    // get the MIPS rating so we can do remaining_instr / MIPS to get seconds remaining for a given task
-    Time_t remaining_exec_time = (total_remaining_instr / (instructions_per_sec * m_info.num_cpus)) * 1000000; // conversion from seconds to microseconds
     return remaining_exec_time; // in microseconds
 }
 
-/* The purpose of this function is to calculate the adjusted pending execution time
-    by taking the current pending time of the given vm, then depending on the mips and
-    number of cpus attached to this vm, these metrics can determine however long
-    it will take for this task to finish given the current state of the vm.
-    The function will return the adjusted amount from the given current pending time.
-*/
-static Time_t FindAdjustedExecTime(TaskId_t task_id, VMId_t vm_id, Time_t curr_pending_time) {
-    VMInfo_t vm_info = VM_GetInfo(vm_id);
-    MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
-    TaskInfo_t t_info = GetTaskInfo(task_id);
-    unsigned int instructions_per_sec = m_info.performance[m_info.p_state] * 1000000;
-    Time_t additional_exec_time = (t_info.remaining_instructions / (instructions_per_sec * m_info.num_cpus)) * 1000000;
-    return curr_pending_time + additional_exec_time;
-}
-
 /*  The point of this function is to calculate the remaining
-    available memory of a given VM attached to a machine,
-    given the assumption that one machine has only one VM
-    (can implement migrating later maybe if time)
+    available memory of a machine
 */
-static unsigned FindRemainingAvailMem(VMId_t vm_id) {
-    VMInfo_t vm_info = VM_GetInfo(vm_id);
-    MachineInfo_t m_info = Machine_GetInfo(vm_info.machine_id);
+static unsigned FindRemainingAvailMem(MachineId_t m_id) {
+    MachineInfo_t m_info = Machine_GetInfo(m_id);
     return m_info.memory_size - m_info.memory_used;
-}
-
-/*  The point of this function is to calculate the adjusted
-    remaining available memory of a given VM after assigning this
-    task, given the assumption that one machine has only one VM
-    (can implement migrating later maybe if time)
-*/
-static unsigned FindAdjustedAvailMem(TaskId_t task_id, VMId_t vm_id, unsigned curr_available_mem) {
-    TaskInfo_t t_info = GetTaskInfo(task_id);
-    return curr_available_mem - t_info.required_memory;
 }
 
 /* This function is meant to extract a template of necessary resources and
@@ -142,462 +126,57 @@ static task_template TemplateExtraction(TaskId_t t_id, Time_t now) {
     return new_template;
 }
 
-/* TODO: add in all the helper functions that will dynamically
-   reallocate idle VMs of a certain type to one of another type
-   when there are overcommitted machines
+/* These functions will help in optimizing for energy and also performance
+   when an io task completes by checking to see if any further load balancing can be done
 */
-
-void Scheduler::AllocateNewLinuxVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task) {
-    if (compute_task) {
-        // pull from other compute VMs first that are idle
-        for (unsigned i = 0; i < Compute_Win.size(); i++) {
-            VMResourcePair vm_pair = Compute_Win[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Win.erase(remove_if(Compute_Win.begin(), Compute_Win.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Win.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < Compute_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linuxrt.erase(remove_if(Compute_Linuxrt.begin(), Compute_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < Compute_Aix.size(); i++) {
-            VMResourcePair vm_pair = Compute_Aix[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Aix.erase(remove_if(Compute_Aix.begin(), Compute_Aix.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Aix.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        // if that still doesn't work then start pulling from IO VMs
-        for (unsigned i = 0; i < IO_Win.size(); i++) {
-            VMResourcePair vm_pair = IO_Win[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Win.erase(remove_if(IO_Win.begin(), IO_Win.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Win.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < IO_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = IO_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linuxrt.erase(remove_if(IO_Linuxrt.begin(), IO_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < IO_Aix.size(); i++) {
-            VMResourcePair vm_pair = IO_Aix[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Aix.erase(remove_if(IO_Aix.begin(), IO_Aix.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Aix.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-    }
-    else {
-        // pull from idle memory VMs
-        for (unsigned i = 0; i < IO_Win.size(); i++) {
-            VMResourcePair vm_pair = IO_Win[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Win.erase(remove_if(IO_Win.begin(), IO_Win.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Win.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < IO_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = IO_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linuxrt.erase(remove_if(IO_Linuxrt.begin(), IO_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < IO_Aix.size(); i++) {
-            VMResourcePair vm_pair = IO_Aix[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Aix.erase(remove_if(IO_Aix.begin(), IO_Aix.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Aix.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        // if that still doesn't work then start pulling from compute VMs
-        for (unsigned i = 0; i < Compute_Win.size(); i++) {
-            VMResourcePair vm_pair = Compute_Win[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Win.erase(remove_if(Compute_Win.begin(), Compute_Win.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Win.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < Compute_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linuxrt.erase(remove_if(Compute_Linuxrt.begin(), Compute_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-
-        for (unsigned i = 0; i < Compute_Aix.size(); i++) {
-            VMResourcePair vm_pair = Compute_Aix[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Aix.erase(remove_if(Compute_Aix.begin(), Compute_Aix.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Aix.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Linux.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-    }
-}
-
-
-void Scheduler::AllocateNewWinVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task) {
-    if (compute_task) {
-        for (unsigned i = 0; i < Compute_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linuxrt.erase(remove_if(Compute_Linuxrt.begin(), Compute_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-        for (unsigned i = 0; i < Compute_Linux.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linux[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linux.erase(remove_if(Compute_Linux.begin(), Compute_Linux.end(),
-                            [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                            }), Compute_Linux.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        } 
-
-        // if that still doesn't work then start pulling from IO vms
-        for (unsigned i = 0; i < IO_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = IO_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linuxrt.erase(remove_if(IO_Linuxrt.begin(), IO_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-        for (unsigned i = 0; i < IO_Linux.size(); i++) {
-            VMResourcePair vm_pair = IO_Linux[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linux.erase(remove_if(IO_Linux.begin(), IO_Linux.end(),
-                            [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                            }), IO_Linux.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                Compute_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-    }
-    else {
-        for (unsigned i = 0; i < IO_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = IO_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linuxrt.erase(remove_if(IO_Linuxrt.begin(), IO_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), IO_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-        for (unsigned i = 0; i < IO_Linux.size(); i++) {
-            VMResourcePair vm_pair = IO_Linux[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                IO_Linux.erase(remove_if(IO_Linux.begin(), IO_Linux.end(),
-                            [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                            }), IO_Linux.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-        
-        // if that doesn't work then start pulling form compute pool
-        for (unsigned i = 0; i < Compute_Linuxrt.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linuxrt[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linuxrt.erase(remove_if(Compute_Linuxrt.begin(), Compute_Linuxrt.end(),
-                        [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                        }), Compute_Linuxrt.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(LINUX, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        }
-        for (unsigned i = 0; i < Compute_Linux.size(); i++) {
-            VMResourcePair vm_pair = Compute_Linux[i];
-            VMInfo_t vm_info = VM_GetInfo(vm_pair.vm_id);
-            MachineId_t m_id = vm_info.machine_id;
-            if (vm_info.active_tasks.size() == 0 && Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
-                Compute_Linux.erase(remove_if(Compute_Linux.begin(), Compute_Linux.end(),
-                            [vm_pair](const VMResourcePair& s) {
-                            return s.vm_id == vm_pair.vm_id;
-                            }), Compute_Linux.end());
-                vms.erase(remove(vms.begin(), vms.end(), vm_pair.vm_id), vms.end());
-                VM_Shutdown(vm_info.vm_id);
-                VMId_t new_vm = VM_Create(WIN, t_info.required_cpu);
-                VM_Attach(new_vm, m_id);
-                IO_Win.push_back({new_vm, FindRemainingExecTime(new_vm), FindRemainingAvailMem(new_vm)});
-                vms.push_back(new_vm);
-                VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
-                return;
-            }
-        } 
-    }
+static void load_balance_IO_linux(TaskId_t task_id, task_template t_template) {
 
 }
 
-void Scheduler::AllocateNewLinuxRTVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task) {
+static void load_balance_IO_ARM(TaskId_t task_id, task_template t_template) {
 
 }
 
-void Scheduler::AllocateNewAixVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task) {
+/* This function is for trying to consolidate as many compute intensive vm's
+   onto one compute machine
+*/
+static void consolidate_vms() {
 
 }
 
+void Scheduler::HandleStateChangeComplete(MachineId_t m_id) {
+    m_changing_state.erase(remove(m_changing_state.begin(), m_changing_state.end(), m_id), m_changing_state.end());
+    if (Machine_GetInfo(m_id).s_state == S5) {
+        powered_down_machines.push_back(m_id);
+    }
+    if (Machine_GetInfo(m_id).s_state == S0 && compute_m_to_io_m > 0) {
+        MemoryMachines.push_back(m_id);
+        compute_m_to_io_m--;
+    }
+    else if (Machine_GetInfo(m_id).s_state == S0 && compute_m_wakeup > 0) {
+        ComputeMachines.push_back(m_id);
+        compute_m_wakeup--;
+    }
+}
 
 void Scheduler::Init() {
     SimOutput("Scheduler::Init(): Total number of machines is " + to_string(Machine_GetTotal()), 3);
     SimOutput("Scheduler::Init(): Initializing scheduler", 1);
 
-    unsigned numARM = 0;
-    unsigned numRISCV = 0;
-    unsigned numPOWER = 0;
-    unsigned numX86 = 0;
-
-    /* these data structures will simply just be local to this function 
-       they will help us in initializing an optimal start and management
-       of all our resources.
-    */
-    vector<MachineId_t> ArmMachines;
-    vector<MachineId_t> PowerMachines;
-    vector<MachineId_t> RiscvMachines;
-    vector<MachineId_t> X86Machines;
-
-    /* classify different types of machines to match the templates to */
-    vector<MachineId_t> ComputeMachines;
-    vector<MachineId_t> MemoryMachines;
-    vector<MachineId_t> BalancedMachines;
-
-    unsigned total_machines = Machine_GetTotal();
+    numARM = 0;
+    numRISCV = 0;
+    numPOWER = 0;
+    numX86 = 0;
 
     maxNumCPUS = 0;
     maxMemory = 0;
     maxMIPS = 0;
+
+    compute_m_to_io_m = 0;
+    compute_m_wakeup = 0;
+
+    unsigned total_machines = Machine_GetTotal();
+
 
     // go through all machines to find a maxNumCPUs and maxMemory metric
     // to perform ratio calculations
@@ -612,6 +191,7 @@ void Scheduler::Init() {
         if (m_info.performance[0] > maxMIPS) {
             maxMIPS = m_info.performance[0];
         }
+        m_has_migration[MachineId_t(i)] = false;
     }
 
     // process each machine to see how they match up to the max's
@@ -661,300 +241,34 @@ void Scheduler::Init() {
         }
         else {
             // this is a pretty balanced machine that can go to either
-            BalancedMachines.push_back(MachineId_t(i));
+            ComputeMachines.size() > MemoryMachines.size() ? MemoryMachines.push_back(MachineId_t(i)) : ComputeMachines.push_back(MachineId_t(i));
         }
     }
 
-    // statically initialize VMs per machine
-
-    for (unsigned i = 0; i < numARM; i++) {
-        VMId_t vm_created;
-        // make sure to find machine type
-        unsigned machine_type;
-        if (find(ComputeMachines.begin(), ComputeMachines.end(), ArmMachines[i]) != ComputeMachines.end()) {
-            // this is a compute intensive machine
-            machine_type = 0;
-        }
-        else if (find(MemoryMachines.begin(), MemoryMachines.end(), ArmMachines[i]) != MemoryMachines.end()) {
-            // this is a memory intensive machine
-            machine_type = 1;
-        }
-        else {
-            // this has to be a balanced machine
-            machine_type = 2;
-        }
-        // now actually do the diff VM initializations
-        if (i >= 0 && i < numARM/2) {
-            vm_created = VM_Create(WIN, ARM);
-            VM_Attach(vm_created, ArmMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Win.size() > IO_Win.size() ? 
-                    IO_Win.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else if (i == numARM/2 || i == (numARM/2 + 1)) {
-            vm_created = VM_Create(LINUX_RT, ARM);
-            VM_Attach(vm_created, ArmMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linuxrt.size() > IO_Linuxrt.size() ? 
-                    IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else {
-            vm_created = VM_Create(LINUX, ARM);
-            VM_Attach(vm_created, ArmMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linux.size() > IO_Linux.size() ? 
-                    IO_Linux.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-         }
-         vms.push_back(vm_created);
+    // start with initializing at least one linux vm per machine
+    // TODO: change to start with only one compute machine with one linux vm.
+    // all other compute machines need to be powered down to start
+    for (unsigned i = 0; i < ComputeMachines.size(); i++) {
+        MachineInfo_t m_info = Machine_GetInfo(ComputeMachines[i]);
+        VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
+        VM_Attach(new_linux_vm, ComputeMachines[i]);
+        // update all necessary data structures
+        m_to_vm_mappings[ComputeMachines[i]].push_back(new_linux_vm);
+        vm_to_m_mappings[new_linux_vm] = ComputeMachines[i];
     }
-
-    for (unsigned i = 0; i < numRISCV; i++) {
-        VMId_t vm_created;
-        // make sure to find machine type
-        unsigned machine_type;
-        if (find(ComputeMachines.begin(), ComputeMachines.end(), RiscvMachines[i]) != ComputeMachines.end()) {
-            // this is a compute intensive machine
-            machine_type = 0;
-        }
-        else if (find(MemoryMachines.begin(), MemoryMachines.end(), RiscvMachines[i]) != MemoryMachines.end()) {
-            // this is a memory intensive machine
-            machine_type = 1;
-        }
-        else {
-            // this has to be a balanced machine
-            machine_type = 2;
-        }
-        
-        // now actually do the diff VM initializations
-        if (i < numRISCV/2) {
-            // initialize LINUX machine
-            vm_created = VM_Create(LINUX, RISCV);
-            VM_Attach(vm_created, RiscvMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linux.size() > IO_Linux.size() ? 
-                    IO_Linux.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else {
-            // initialize other machines 
-            vm_created = VM_Create(LINUX_RT, RISCV);
-            VM_Attach(vm_created, RiscvMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linuxrt.size() > IO_Linuxrt.size() ? 
-                    IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        vms.push_back(vm_created);
-    }
-
-    for (unsigned i = 0; i < numPOWER; i++) {
-        VMId_t vm_created;
-        // make sure to find machine type
-        unsigned machine_type;
-        if (find(ComputeMachines.begin(), ComputeMachines.end(), PowerMachines[i]) != ComputeMachines.end()) {
-            // this is a compute intensive machine
-            machine_type = 0;
-        }
-        else if (find(MemoryMachines.begin(), MemoryMachines.end(), PowerMachines[i]) != MemoryMachines.end()) {
-            // this is a memory intensive machine
-            machine_type = 1;
-        }
-        else {
-            // this has to be a balanced machine
-            machine_type = 2;
-        }
-
-        // now actually do the diff VM initializations
-        if (i < numPOWER/2) {
-            // initialize AIX machines
-            vm_created = VM_Create(AIX, POWER);
-            VM_Attach(vm_created, PowerMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Aix.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Aix.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Aix.size() > IO_Aix.size() ? 
-                    IO_Aix.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Aix.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else if (i == numPOWER/2) {
-            vm_created = VM_Create(LINUX_RT, POWER);
-            VM_Attach(vm_created, PowerMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linuxrt.size() > IO_Linuxrt.size() ? 
-                    IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else {
-            vm_created = VM_Create(LINUX, POWER);
-            VM_Attach(vm_created, PowerMachines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linux.size() > IO_Linux.size() ? 
-                    IO_Linux.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        vms.push_back(vm_created);
-    }
-
-    for (unsigned i = 0; i < numX86; i++) {
-        VMId_t vm_created;
-        // make sure to find machine type
-        unsigned machine_type;
-        if (find(ComputeMachines.begin(), ComputeMachines.end(), X86Machines[i]) != ComputeMachines.end()) {
-            // this is a compute intensive machine
-            machine_type = 0;
-        }
-        else if (find(MemoryMachines.begin(), MemoryMachines.end(), X86Machines[i]) != MemoryMachines.end()) {
-            // this is a memory intensive machine
-            machine_type = 1;
-        }
-        else {
-            // this has to be a balanced machine
-            machine_type = 2;
-        }
-        
-        // now actually do the diff VM initializations
-        if (i >= 0 && i < numX86/2) {
-            // initialize LINUX machine
-            vm_created = VM_Create(LINUX, X86);
-            VM_Attach(vm_created, X86Machines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linux.size() > IO_Linux.size() ? 
-                    IO_Linux.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linux.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else if (i == numX86/2 || i == (numX86/2 + 1)) {
-            vm_created = VM_Create(LINUX_RT, X86);
-            VM_Attach(vm_created, X86Machines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Linuxrt.size() > IO_Linuxrt.size() ? 
-                    IO_Linuxrt.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Linuxrt.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        else {
-            vm_created = VM_Create(WIN, X86);
-            VM_Attach(vm_created, X86Machines[i]);
-            Time_t remainingtime = FindRemainingExecTime(vm_created);
-            unsigned remainingmem = FindRemainingAvailMem(vm_created);
-            if (machine_type == 0) {
-                Compute_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else if (machine_type == 1) {
-                IO_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-            else {
-                Compute_Win.size() > IO_Win.size() ? 
-                    IO_Win.push_back({vm_created, remainingtime, remainingmem}) 
-                        : Compute_Win.push_back({vm_created, remainingtime, remainingmem});
-            }
-        }
-        vms.push_back(vm_created);
+    for (unsigned i = 0; i < MemoryMachines.size(); i++) {
+        MachineInfo_t m_info = Machine_GetInfo(MemoryMachines[i]);
+        VMId_t new_linux_vm = VM_Create(LINUX, m_info.cpu);
+        VM_Attach(new_linux_vm, MemoryMachines[i]);
+        // update all necessary data structures
+        m_to_vm_mappings[MemoryMachines[i]].push_back(new_linux_vm);
+        vm_to_m_mappings[new_linux_vm] = MemoryMachines[i];
     }
 
     // debugging statements
     cout << "number of compute machines found: " << ComputeMachines.size() << endl;
     cout << "number of io machines found: " << MemoryMachines.size() << endl;
-    cout << "number of balanced machines found: " << BalancedMachines.size() << endl;
 
-    cout << "number of compute linux vms made: " << Compute_Linux.size() << endl;
-    cout << "number of compute linuxrt vms made: " << Compute_Linuxrt.size() << endl;
-    cout << "number of compute win vms made: " << Compute_Win.size() << endl;
-    cout << "number of compute aix vms made: " << Compute_Aix.size() << endl;
-
-    cout << "number of io linux vms made: " << IO_Linux.size() << endl;
-    cout << "number of io linuxrt vms made: " << IO_Linuxrt.size() << endl;
-    cout << "number of io win vms made: " << IO_Win.size() << endl;
-    cout << "number of io aix vms made: " << IO_Aix.size() << endl;
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
@@ -963,168 +277,141 @@ void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
     task_template new_template = TemplateExtraction(task_id, now);
+    task_temp_mappings[task_id] = new_template;
     TaskInfo_t t_info = GetTaskInfo(task_id);
 
-    vector<VMResourcePair> vm_sorted_resource;
-    vector<VMResourcePair> adjusted_sorted_resource;
+    vector<MResourcePair> m_sorted_resource;
+    vector<MResourcePair> adjusted_sorted_resource;
 
-    // only looking through the pool of vms that match this task's required vm type and task type
-   if (new_template.compute_task) {
-    switch(t_info.required_vm) {
-        case LINUX:
-            for (VMResourcePair vm_pair: Compute_Linux) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
+    // only looking through the pool of machines that match this task's required cpu type and task type
+    if (new_template.compute_task) {
+        for (MachineId_t m_id: ComputeMachines) {
+            if (Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+                Time_t pending_execution_time = FindRemainingExecTime(m_id);
+                unsigned available_mem = FindRemainingAvailMem(m_id);
+                if (available_mem - t_info.required_memory > 0) {
+                     m_sorted_resource.push_back({m_id, pending_execution_time, available_mem});
+                }
             }
-            break;
-        case LINUX_RT:
-            for (VMResourcePair vm_pair: Compute_Linuxrt) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        case WIN:
-            for (VMResourcePair vm_pair: Compute_Win) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        case AIX:
-            for (VMResourcePair vm_pair: Compute_Aix) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        default:
-            break;
+        }
+        // sort based on ascending pending execution time
+        sort(m_sorted_resource.begin(), m_sorted_resource.end(),
+            [](const MResourcePair& a, MResourcePair& b){
+                return a.pending_execution_time > b.pending_execution_time;
+            });
     }
-    // sort based on ascending pending execution time
-    sort(vm_sorted_resource.begin(), vm_sorted_resource.end(),
-        [](const VMResourcePair& a, VMResourcePair& b){
-            return a.pending_execution_time < b.pending_execution_time;
-        });
-    // now go through and adjust every vm on this list by its remaining resources and
-    // re-sort based on pending execution time
-    for (VMResourcePair vm_pair: vm_sorted_resource) {
-        MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(vm_pair.vm_id).machine_id);
-        Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
-        unsigned adjusted_mem = FindAdjustedAvailMem(task_id, vm_pair.vm_id, m_info.memory_size - m_info.memory_used);
-        adjusted_sorted_resource.push_back({vm_pair.vm_id, adjusted_time, adjusted_mem});
-    }
-    sort(adjusted_sorted_resource.begin(), adjusted_sorted_resource.end(),
-        [](const VMResourcePair& a, VMResourcePair& b){
-            return a.pending_execution_time < b.pending_execution_time;
-        });
-   }
-   else {
-    switch(t_info.required_vm) {
-        case LINUX:
-            for (VMResourcePair vm_pair: IO_Linux) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
+    else {
+        for (MachineId_t m_id: MemoryMachines) {
+            if (Machine_GetInfo(m_id).cpu == t_info.required_cpu) {
+                Time_t pending_execution_time = FindRemainingExecTime(m_id);
+                unsigned available_mem = FindRemainingAvailMem(m_id);
+                if (available_mem - t_info.required_memory > 0) {
+                    m_sorted_resource.push_back({m_id, pending_execution_time, available_mem});
+                }
             }
-            break;
-        case LINUX_RT:
-            for (VMResourcePair vm_pair: IO_Linuxrt) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        case WIN:
-            for (VMResourcePair vm_pair: IO_Win) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        case AIX:
-            for (VMResourcePair vm_pair: IO_Aix) {
-                Time_t pending_execution_time = FindRemainingExecTime(vm_pair.vm_id);
-                unsigned available_mem = FindRemainingAvailMem(vm_pair.vm_id);
-                vm_sorted_resource.push_back({vm_pair.vm_id, pending_execution_time, available_mem});
-            }
-            break;
-        default:
-            break;
-    }
-    // sort by descending available memory order
-    sort(vm_sorted_resource.begin(), vm_sorted_resource.end(),
-        [](const VMResourcePair& a, VMResourcePair& b){
-            return a.avail_mem > b.avail_mem;
-        });
-    // now go through and adjust every vm on this list by its remaining resources and 
-    // re-sort based on available memory remaining
-    for (VMResourcePair vm_pair: vm_sorted_resource) {
-        MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(vm_pair.vm_id).machine_id);
-        Time_t adjusted_time = FindAdjustedExecTime(task_id, vm_pair.vm_id, vm_pair.pending_execution_time);
-        unsigned adjusted_mem = FindAdjustedAvailMem(task_id, vm_pair.vm_id, m_info.memory_size - m_info.memory_used);
-        adjusted_sorted_resource.push_back({vm_pair.vm_id, adjusted_time, adjusted_mem});
-    }
-    sort(adjusted_sorted_resource.begin(), adjusted_sorted_resource.end(),
-        [](const VMResourcePair& a, VMResourcePair& b){
-            return a.avail_mem > b.avail_mem;
-        });
+        }
+        // sort by descending available memory order
+        sort(m_sorted_resource.begin(), m_sorted_resource.end(),
+            [](const MResourcePair& a, MResourcePair& b){
+                return a.avail_mem > b.avail_mem;
+            });
    }
 
-    for (unsigned i = 0; i < adjusted_sorted_resource.size(); i++) {
-        VMResourcePair vm_pair = adjusted_sorted_resource[i];
-        VMId_t possible_vm = vm_pair.vm_id;
-        MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
-        if (m_info.cpu == t_info.required_cpu && vm_pair.avail_mem > 0) {
-            VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
+
+    for (unsigned i = 0; i < m_sorted_resource.size(); i++) {
+        MResourcePair m_pair = m_sorted_resource[i];
+        MachineId_t possible_m = m_pair.m_id;
+        MachineInfo_t m_info = Machine_GetInfo(possible_m);
+        vector<VMId_t> this_vm_vector = m_to_vm_mappings[m_pair.m_id];
+        for (VMId_t this_vm: this_vm_vector) {
+            if (VM_GetInfo(this_vm).vm_type == t_info.required_vm) {
+                // don't need to do a migration check bc pr sure this data structure will be synchronized for all migration calls
+                VM_AddTask(this_vm, task_id, HIGH_PRIORITY);
+                // update necessary datastructs
+                vm_mappings[task_id] = this_vm;
+                return;
+            }
+        }
+    }
+
+    if (m_sorted_resource.size() == 0) {
+        // if we reached here, there are no available machines that fit this task type at all
+        // need to dynamically re-classify unused machines
+        if (new_template.compute_task) {    // if it is a compute task, we need to look at unused io machines
+            for (MachineId_t m_id: MemoryMachines) {
+                MachineInfo_t m_info = Machine_GetInfo(m_id);
+                if (m_info.cpu == t_info.required_cpu && m_info.active_tasks == 0) {
+                    MemoryMachines.erase(remove(MemoryMachines.begin(), MemoryMachines.end(), m_id), MemoryMachines.end());
+                    ComputeMachines.push_back(m_id);
+                    for (VMId_t vm_id: m_to_vm_mappings[m_id]) {
+                        if (VM_GetInfo(vm_id).vm_type == t_info.required_vm) {
+                            VM_AddTask(vm_id, task_id, HIGH_PRIORITY);
+                            vm_mappings[task_id] = vm_id;
+                            return;
+                        }
+                    }
+                    // create new vm for this machine that matches everything
+                    VMId_t new_vm = VM_Create(t_info.required_vm, t_info.required_cpu);
+                    VM_Attach(new_vm, m_id);
+                    VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+                    // update data structures
+                    m_to_vm_mappings[m_id].push_back(new_vm);
+                    vm_mappings[task_id] = new_vm;
+                    vm_to_m_mappings[new_vm] = m_id;
+                    return;
+                }
+            }
+        }
+        else {  // if it is an io task, we need to add task to a compute machine and make sure to turn a powered down machine to an IO machine
+            for (MachineId_t m_id: ComputeMachines) {
+                MachineInfo_t m_info = Machine_GetInfo(m_id);
+                if ((m_info.cpu == t_info.required_cpu) && (m_info.memory_size - m_info.memory_used > t_info.required_memory)) {
+                    for (VMId_t vm_id: m_to_vm_mappings[m_id]) {
+                        if (VM_GetInfo(vm_id).vm_type == t_info.required_vm) {
+                            VM_AddTask(vm_id, task_id, HIGH_PRIORITY);
+                            vm_mappings[task_id] = vm_id;
+                            return;
+                        }
+                    }
+                    // create new vm for this machine that matches everything
+                    VMId_t new_vm = VM_Create(t_info.required_vm, t_info.required_cpu);
+                    VM_Attach(new_vm, m_id);
+                    VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+                    // update data structures
+                    m_to_vm_mappings[m_id].push_back(new_vm);
+                    vm_mappings[task_id] = new_vm;
+                    vm_to_m_mappings[new_vm] = m_id;
+                    return;
+                }
+            }
+            MachineId_t m_id = powered_down_machines[0];
+            powered_down_machines.erase(powered_down_machines.begin());
+            m_changing_state.push_back(m_id);
+            Machine_SetState(m_id, S0);
+            // // TODO: is this line necessary? if we power down then we just remove from compute machines tbh?? actually whatever
+            // ComputeMachines.erase(remove_if(ComputeMachines.begin(), ComputeMachines.end(), m_id), ComputeMachines.end());
+            compute_m_to_io_m++;
+            return;
+        }
+    }
+    else {
+        // there were simply just no vm's of the type we need. pick the first machine that works and add a vm to it
+        // then add task to that vm
+        for (unsigned i = 0; i < m_sorted_resource.size(); i++) {
+            MResourcePair m_pair = m_sorted_resource[i];
+            MachineId_t possible_m = m_pair.m_id;
+            MachineInfo_t m_info = Machine_GetInfo(possible_m);
+            VMId_t new_vm = VM_Create(t_info.required_vm, t_info.required_cpu);
+            VM_Attach(new_vm, m_pair.m_id);
+            VM_AddTask(new_vm, task_id, HIGH_PRIORITY);
+            // update data structures
+            m_to_vm_mappings[m_pair.m_id].push_back(new_vm);
+            vm_mappings[task_id] = new_vm;
+            vm_to_m_mappings[new_vm] = m_pair.m_id;
             return;
         }
     }
 
-    // reaching here means all other VMs of this task's required VM type are overcommitted.
-    // need to convert a compatible unused machine to a VM of this type instead.
-    switch(t_info.required_vm) {
-        case LINUX:
-            AllocateNewLinuxVM(task_id, t_info, new_template.compute_task);
-            break;
-        case LINUX_RT:
-            AllocateNewLinuxRTVM(task_id, t_info, new_template.compute_task);
-            break;
-        case WIN:
-            AllocateNewWinVM(task_id, t_info, new_template.compute_task);
-            break;
-        case AIX:
-            AllocateNewAixVM(task_id, t_info, new_template.compute_task);
-            break;
-        default:
-            break;
-    }
-
-
-//    // now just choose the first vm that matches cpu description and (if possible) gpu
-//    if (new_template.gpu_enabled) {
-//     for (unsigned i = 0; i < adjusted_sorted_resource.size(); i++) {
-//         VMResourcePair vm_pair = adjusted_sorted_resource[i];
-//         VMId_t possible_vm = vm_pair.vm_id;
-//         MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
-//         if (m_info.cpu == t_info.required_cpu && vm_pair.avail_mem > 0) {
-//             VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
-//             return;
-//         }
-//     }
-//    }
-//    else {
-//     for (unsigned i = 0; i < adjusted_sorted_resource.size(); i++) {
-//         VMResourcePair vm_pair = adjusted_sorted_resource[i];
-//         VMId_t possible_vm = vm_pair.vm_id;
-//         MachineInfo_t m_info = Machine_GetInfo(VM_GetInfo(possible_vm).machine_id);
-//         if (m_info.cpu == t_info.required_cpu && vm_pair.avail_mem > 0) {
-//             VM_AddTask(possible_vm, task_id, HIGH_PRIORITY);
-//             return;
-//         }
-//     }
-//    }
 
 }
 
@@ -1148,10 +435,40 @@ void Scheduler::Shutdown(Time_t time) {
 }
 
 void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
-    // Do any bookkeeping necessary for the data structures
-    // Decide if a machine is to be turned off, slowed down, or VMs to be migrated according to your policy
-    // This is an opportunity to make any adjustments to optimize performance/energy
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
+    task_temp_mappings.erase(task_id);
+    vm_mappings.erase(task_id);
+    // need to update the utilization and memory usage based on this complete task
+
+    // trying to migrate tasks over to other compatible task type machines to free up memory for io vms
+    // vector<VMResourcePair> OverloadedVMs;
+    // vector<VMResourcePair> UnderloadedVMs;
+    // for (unsigned i = 0; i < Compute_Linux.size()/2; i++) {
+    //     UnderloadedVMs.push_back(Compute_Linux[i]);
+    // }
+    // for (unsigned i = Compute_Linux.size()/2; i < Compute_Linux.size(); i++) {
+    //     OverloadedVMs.push_back(Compute_Linux[i]);
+    // }
+
+    // unsigned underloaded_index = 0;
+    // for (VMResourcePair vm_pair: OverloadedVMs) {
+    //     if (VM_GetInfo(vm_pair.vm_id).active_tasks.size() > 0) {
+    //         TaskId_t task_to_migrate = VM_GetInfo(vm_pair.vm_id).active_tasks[0];
+    //         for (unsigned i = underloaded_index; i < UnderloadedVMs.size(); i++) {
+    //             if (Machine_GetInfo(VM_GetInfo(UnderloadedVMs[i].vm_id).machine_id).cpu == GetTaskInfo(task_id).required_cpu) {
+    //                 // check for a threshold number, if the load between the two chosen is quite balanced already then just return
+    //                 // else, continue on with load balancing
+    //                 if (vm_pair.pending_execution_time - UnderloadedVMs[i].pending_execution_time <= 1000000) {
+    //                     return;
+    //                 }
+    //                 VM_RemoveTask(vm_pair.vm_id, task_to_migrate);
+    //                 VM_AddTask(UnderloadedVMs[i].vm_id, task_to_migrate, HIGH_PRIORITY);
+    //                 underloaded_index++;
+    //             }
+    //         } 
+    //     }      
+    // }
+    // also trying dvfs for compute vms
 }
 
 // Public interface below
@@ -1209,4 +526,5 @@ void SLAWarning(Time_t time, TaskId_t task_id) {
 
 void StateChangeComplete(Time_t time, MachineId_t machine_id) {
     // Called in response to an earlier request to change the state of a machine
+    Scheduler.HandleStateChangeComplete(machine_id);
 }

@@ -25,6 +25,7 @@ public:
     void AllocateNewWinVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task);
     void AllocateNewLinuxRTVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task);
     void AllocateNewAixVM(TaskId_t task_id, TaskInfo_t t_info, bool compute_task);
+    void HandleStateChangeComplete(MachineId_t m_info);
 private:
     vector<VMId_t> vms;
     vector<MachineId_t> machines;
