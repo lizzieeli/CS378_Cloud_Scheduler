@@ -42,11 +42,10 @@ map<TaskId_t, VMId_t> vm_mappings;
 /* everytime we create a new vm or migrate a vm to another machine */
 map<VMId_t, MachineId_t> vm_to_m_mappings;
 map<MachineId_t, vector<VMId_t>> m_to_vm_mappings;
+map<VMId_t, MachineId_t> vms_migrating_with_old_machine;
 
 
 /* for migration bookkeeping to maintain correctness */
-map<MachineId_t, bool> m_has_migration; // if consolidating, prob shouldn't check and consider this machine if it already has a migration to it
-map<VMId_t, bool> vm_migrating; // for consolidating, need to add checks to make sure a vm in this isnt migrating before adding task
 vector<MachineId_t> m_changing_state; // we know all machines in this can be for compute tasks
 vector<MachineId_t> powered_down_machines; // we know all machines in this can be for compute tasks
 
@@ -129,18 +128,56 @@ static task_template TemplateExtraction(TaskId_t t_id, Time_t now) {
 /* These functions will help in optimizing for energy and also performance
    when an io task completes by checking to see if any further load balancing can be done
 */
-static void load_balance_IO_linux(TaskId_t task_id, task_template t_template) {
+static void load_balance_IO_Machines(TaskId_t task_id, task_template t_template) {
 
 }
 
-static void load_balance_IO_ARM(TaskId_t task_id, task_template t_template) {
 
+/* This is a helper function to move all the vms on m2 to m1 and power down m2
+*/
+static void migrate_all_vms_and_power_down(MachineId_t m1, MachineId_t m2) {
+    ComputeMachines.erase(remove(ComputeMachines.begin(), ComputeMachines.end(), m1), ComputeMachines.end());
+    ComputeMachines.erase(remove(ComputeMachines.begin(), ComputeMachines.end(), m2), ComputeMachines.end());
+    vector<VMId_t> vms_on_m2 = m_to_vm_mappings[m2];
+    for (VMId_t this_vm : vms_on_m2) {
+        vms_migrating_with_old_machine[this_vm] = m2;
+        m_to_vm_mappings[m1].push_back(this_vm);
+        m_to_vm_mappings[m2].erase(remove(m_to_vm_mappings[m2].begin(), m_to_vm_mappings[m2].end(), this_vm), m_to_vm_mappings[m2].end());
+        vm_to_m_mappings[this_vm] = m1;
+        m_changing_state.push_back(m2);
+        VM_Migrate(this_vm, m1);
+    }
 }
 
 /* This function is for trying to consolidate as many compute intensive vm's
    onto one compute machine
 */
 static void consolidate_vms() {
+    // first go through and calculate the resources (memory and remaining execution time)
+    // of every compute machine that is up.
+    vector<MResourcePair> current_m_compute_resources;
+    for (MachineId_t m_id : ComputeMachines) {
+        Time_t remaining_exec_time = FindRemainingExecTime(m_id);
+        unsigned avail_mem = FindRemainingAvailMem(m_id);
+        current_m_compute_resources.push_back({m_id, remaining_exec_time, avail_mem});
+    }
+    // then try to migrate all vm's of one machine to another if possible and turn off that machine.
+    for (MResourcePair m_pair1 : current_m_compute_resources) {
+        MachineInfo_t m_info1 = Machine_GetInfo(m_pair1.m_id);
+        for (MResourcePair m_pair2 : current_m_compute_resources) {
+            MachineInfo_t m_info2 = Machine_GetInfo(m_pair2.m_id);
+            if (m_pair1.m_id != m_pair2.m_id && m_info1.cpu == m_info2.cpu) {
+                if (m_pair1.avail_mem >= m_info2.memory_used) {
+                    migrate_all_vms_and_power_down(m_pair1.m_id, m_pair2.m_id);
+                    return;
+                }
+                else if (m_pair2.avail_mem >= m_info1.memory_used) {
+                    migrate_all_vms_and_power_down(m_pair2.m_id, m_pair1.m_id);
+                    return;
+                }
+            }
+        }
+    }
 
 }
 
@@ -191,7 +228,6 @@ void Scheduler::Init() {
         if (m_info.performance[0] > maxMIPS) {
             maxMIPS = m_info.performance[0];
         }
-        m_has_migration[MachineId_t(i)] = false;
     }
 
     // process each machine to see how they match up to the max's
@@ -272,7 +308,19 @@ void Scheduler::Init() {
 }
 
 void Scheduler::MigrationComplete(Time_t time, VMId_t vm_id) {
-    // Update your data structure. The VM now can receive new tasks
+    // Update your data structure
+    MachineId_t old_m_id = vms_migrating_with_old_machine[vm_id];
+    vms_migrating_with_old_machine.erase(vm_id);
+    MachineId_t m_id = vm_to_m_mappings[vm_id];
+    for (map<VMId_t, MachineId_t>::iterator it = vms_migrating_with_old_machine.begin(); it != vms_migrating_with_old_machine.end(); it++) {
+        if (it->second == old_m_id) {
+            return;
+        }
+    }
+    // if we reached here we finally sucessfully migrated all vm's on old machine. can call to power it down
+    m_changing_state.push_back(old_m_id);
+    Machine_SetState(old_m_id, S5);
+    ComputeMachines.push_back(m_id);
 }
 
 void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
@@ -387,9 +435,9 @@ void Scheduler::NewTask(Time_t now, TaskId_t task_id) {
             MachineId_t m_id = powered_down_machines[0];
             powered_down_machines.erase(powered_down_machines.begin());
             m_changing_state.push_back(m_id);
+            // TODO: is this line necessary? if we power down then we just remove from compute machines tbh?? actually whatever
+            ComputeMachines.erase(remove(ComputeMachines.begin(), ComputeMachines.end(), m_id), ComputeMachines.end());
             Machine_SetState(m_id, S0);
-            // // TODO: is this line necessary? if we power down then we just remove from compute machines tbh?? actually whatever
-            // ComputeMachines.erase(remove_if(ComputeMachines.begin(), ComputeMachines.end(), m_id), ComputeMachines.end());
             compute_m_to_io_m++;
             return;
         }
@@ -438,6 +486,7 @@ void Scheduler::TaskComplete(Time_t now, TaskId_t task_id) {
     SimOutput("Scheduler::TaskComplete(): Task " + to_string(task_id) + " is complete at " + to_string(now), 4);
     task_temp_mappings.erase(task_id);
     vm_mappings.erase(task_id);
+    consolidate_vms();
     // need to update the utilization and memory usage based on this complete task
 
     // trying to migrate tasks over to other compatible task type machines to free up memory for io vms
